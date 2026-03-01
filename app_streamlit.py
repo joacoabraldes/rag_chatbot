@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import os, json, datetime, math
 from typing import List, Tuple, Dict, Any, Optional
+from dotenv import load_dotenv
+load_dotenv()
 import streamlit as st
 import chromadb
 from langchain_chroma import Chroma
@@ -193,7 +195,73 @@ def expand_queries(q: str) -> list[str]:
         }
     if "abril" in lower:
         expansions |= {"mediados de abril", "segunda quincena de abril"}
+    # expansión genérica para cotizaciones
+    dollar_types = {"dólar", "dolar", "dollar"}
+    if dollar_types & set(lower.split()):
+        expansions |= {"dólar oficial", "dólar MEP", "dólar CCL", "dólar blue",
+                       "contado con liquidación", "cotización del dólar",
+                       "tipo de cambio", "MULC"}
     return [base] + [e for e in expansions if e != base]
+
+
+def deduplicate_candidates(candidates: list, content_window: int = 150) -> list:
+    """Deduplica chunks por contenido + fuente para evitar resultados repetidos."""
+    seen = set()
+    unique = []
+    for doc, dist in candidates:
+        key = (
+            doc.page_content[:content_window],
+            doc.metadata.get("rel_path", ""),
+            doc.metadata.get("chunk_id", ""),
+        )
+        if key not in seen:
+            seen.add(key)
+            unique.append((doc, dist))
+    return unique
+
+
+def assess_confidence(top_results: list, sim_threshold: float = 0.35,
+                      min_good_results: int = 2) -> dict:
+    """Evalúa si el contexto recuperado es suficiente para responder con confianza.
+
+    Returns dict with:
+      - confident: bool
+      - reason: str (human-readable explanation)
+      - avg_sim: float
+      - good_count: int (results above threshold)
+    """
+    if not top_results:
+        return {"confident": False, "reason": "no_results",
+                "avg_sim": 0.0, "good_count": 0}
+
+    sims = [sim_from_distance(dist) for (_, dist, _) in top_results]
+    avg_sim = sum(sims) / len(sims)
+    good_count = sum(1 for s in sims if s >= sim_threshold)
+
+    if good_count < min_good_results:
+        return {"confident": False, "reason": "low_relevance",
+                "avg_sim": avg_sim, "good_count": good_count}
+
+    return {"confident": True, "reason": "ok",
+            "avg_sim": avg_sim, "good_count": good_count}
+
+
+def build_confidence_note(conf: dict) -> str:
+    """Genera nota para incluir en el prompt cuando la confianza es baja."""
+    if conf["confident"]:
+        return ""
+    if conf["reason"] == "no_results":
+        return ("\n\n⚠️ NOTA INTERNA: No se encontraron resultados relevantes en los documentos. "
+                "Indicá que no hay información disponible y preguntá "
+                "al usuario si puede reformular la pregunta o dar más detalles "
+                "(período, región, indicador específico, etc.).")
+    if conf["reason"] == "low_relevance":
+        return (f"\n\n⚠️ NOTA INTERNA: Solo {conf['good_count']} fragmentos tienen "
+                f"relevancia aceptable (similitud promedio: {conf['avg_sim']:.2f}). "
+                "La información podría ser parcial. Respondé con lo que tengas "
+                "pero advertí al usuario y pedile que precise su consulta "
+                "(ej: país, período, indicador específico).")
+    return ""
 
 # ========= App =========
 
@@ -234,6 +302,8 @@ min_date_str      = st.sidebar.text_input("Filtrar desde fecha (YYYY-MM-DD)", va
 st.sidebar.markdown("### 🔎 Recuperación avanzada")
 fetch_factor          = st.sidebar.slider("Fetch factor", 1.0, 4.0, 2.0, 0.5)
 use_query_expansion   = st.sidebar.checkbox("Usar expansión de consulta", value=True)
+confidence_threshold  = st.sidebar.slider("Umbral de similitud (confianza)", 0.1, 0.8, 0.35, 0.05)
+min_good_results      = st.sidebar.number_input("Mín. fragmentos relevantes", min_value=1, max_value=10, value=2, step=1)
 
 render_plain = st.sidebar.checkbox("Render respuesta como texto plano", value=False)
 st.sidebar.markdown("---")
@@ -262,7 +332,7 @@ for m in st.session_state.messages:
         st.markdown(m["content"])
         if show_sources and m.get("sources"):
             with st.expander("Fuentes"):
-                for s in sources:
+                for s in m["sources"]:
                     st.text(clean_text(s))
 
 
@@ -299,6 +369,9 @@ if user_input and selected_cols:
                     doc.metadata = md
                     candidates_all.append((doc, dist))
 
+        # Deduplication
+        candidates_all = deduplicate_candidates(candidates_all)
+
         filtered = []
         if target_date:
             window = 3
@@ -331,25 +404,14 @@ if user_input and selected_cols:
             for i, doc in enumerate(top_docs, 1)
         )
 
-        # context = "\n\n".join(
-        #     f"[{i}] ({format_source_tag(doc.metadata)})\n{doc.page_content}" for i, doc in enumerate(top_docs, 1)
-        # )
-        system_prompt = load_prompt(PROMPT_PATH).format(context=context, question=user_input)
-        # try:
-        #     user_lang = langdetect.detect(user_input)
-        # except:
-        #     user_lang = "es"
+        # Confidence assessment
+        confidence = assess_confidence(top, sim_threshold=confidence_threshold,
+                                       min_good_results=min_good_results)
+        confidence_note = build_confidence_note(confidence)
 
-        # lang_instructions = {
-        #     "en": "Answer in English, keeping the same tone and style as the question.",
-        #     "es": "Responde en español, manteniendo el mismo tono y estilo de la pregunta."
-        # }
-
-        # system_prompt = (
-        #     load_prompt(PROMPT_PATH).format(context=context, question=user_input)
-        #     + "\n\n"
-        #     + lang_instructions.get(user_lang, lang_instructions["es"])
-        # )
+        system_prompt = load_prompt(PROMPT_PATH).format(
+            context=context, question=user_input
+        ) + confidence_note
 
 
     # LLM OpenAI (system_prompt ya existe en este scope)
@@ -381,6 +443,14 @@ if user_input and selected_cols:
 
     # Respuesta
     with st.chat_message("assistant"):
+        # Confidence indicator
+        if not confidence["confident"]:
+            if confidence["reason"] == "no_results":
+                st.warning("⚠️ No se encontraron fragmentos relevantes. La respuesta puede ser limitada.")
+            elif confidence["reason"] == "low_relevance":
+                st.info(f"ℹ️ Contexto parcial ({confidence['good_count']} fragmentos relevantes, "
+                        f"similitud promedio: {confidence['avg_sim']:.2f}). "
+                        "Considerá reformular o dar más detalles.")
         if render_plain:
             st.text(normalize_plain(answer))  # texto plano
         else:
@@ -411,6 +481,7 @@ if user_input and selected_cols:
         "recency_weight": recency_weight,
         "recency_half_life": recency_half_life,
         "min_date": min_date_str,
+        "confidence": confidence,
     }
     save_history(history_path, record)
 

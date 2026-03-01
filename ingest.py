@@ -5,10 +5,19 @@ import argparse, os, json, pathlib, uuid, math, re, datetime
 from typing import List, Dict, Any, Optional
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain.docstore.document import Document
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 import chromadb
 
+try:
+    import pypdf
+    HAS_PYPDF = True
+except ImportError:
+    HAS_PYPDF = False
+
 DB_DIR_DEFAULT = "./chroma_db"
+DEFAULT_CHUNK_SIZE = 512
+DEFAULT_CHUNK_OVERLAP = 64
 
 DATE_PATTERNS = [
     # YYYYMMDD
@@ -64,6 +73,40 @@ def read_txt_dir(path: str) -> List[Document]:
         docs.append(Document(page_content=text, metadata=meta))
     return docs
 
+def read_pdf_dir(path: str) -> List[Document]:
+    """Lee todos los .pdf de un directorio, extrayendo texto por página."""
+    if not HAS_PYPDF:
+        raise ImportError("Se requiere 'pypdf' para leer PDFs. Instalá con: pip install pypdf")
+    docs = []
+    p = pathlib.Path(path)
+    for f in sorted(p.glob("**/*.pdf")):
+        try:
+            reader = pypdf.PdfReader(str(f))
+        except Exception as e:
+            print(f"  ⚠️ No se pudo leer {f.name}: {e}")
+            continue
+        full_text_parts = []
+        for pi, page in enumerate(reader.pages):
+            page_text = (page.extract_text() or "").strip()
+            if page_text:
+                full_text_parts.append(page_text)
+        full_text = "\n\n".join(full_text_parts)
+        if not full_text.strip():
+            print(f"  ⚠️ {f.name}: no se pudo extraer texto (puede ser imagen/scan)")
+            continue
+        meta = {
+            "source": str(f),
+            "rel_path": f.name,
+            "chunk_id": None,
+            "total_pages": len(reader.pages),
+        }
+        di = infer_date_iso(meta, None)
+        if di:
+            meta["date_iso"] = di
+        docs.append(Document(page_content=full_text, metadata=meta))
+        print(f"  ✅ {f.name}: {len(reader.pages)} págs, {len(full_text)} chars")
+    return docs
+
 def read_jsonl(path: str, date_field: Optional[str]) -> List[Document]:
     """
     Soporta:
@@ -107,10 +150,40 @@ def batched(seq, n):
     for i in range(0, len(seq), n):
         yield seq[i:i+n]
 
+
+def chunk_documents(docs: List[Document], chunk_size: int, chunk_overlap: int) -> List[Document]:
+    """Split documents into smaller chunks, preserving and enriching metadata."""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", ". ", ", ", " ", ""],
+        length_function=len,
+    )
+    chunked: List[Document] = []
+    for doc in docs:
+        splits = splitter.split_text(doc.page_content)
+        full_text = doc.page_content
+        cursor = 0
+        for ci, piece in enumerate(splits):
+            start = full_text.find(piece, cursor)
+            if start == -1:
+                start = cursor
+            end = start + len(piece)
+            cursor = max(cursor, end - chunk_overlap)
+
+            md = dict(doc.metadata)
+            md["chunk_id"] = ci
+            md["chunk_start"] = start
+            md["chunk_end"] = end
+            md["chunk_total"] = len(splits)
+            chunked.append(Document(page_content=piece, metadata=md))
+    return chunked
+
 def main():
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--input", help="Directorio con .txt (cada archivo = un chunk)")
+    g.add_argument("--pdf", help="Directorio con .pdf")
     g.add_argument("--jsonl", help="Archivo .jsonl (texto + metadatos)")
     ap.add_argument("--persist", default=os.environ.get("CHROMA_DB_DIR", DB_DIR_DEFAULT),
                     help="Directorio de persistencia de Chroma")
@@ -120,13 +193,33 @@ def main():
     ap.add_argument("--batch-size", type=int, default=1000, help="Lote (< 5461)")
     ap.add_argument("--date-field", default=None,
                     help="Nombre de campo en metadata que contiene la fecha (si existe). Si no, se infiere del filename.")
+    ap.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE,
+                    help=f"Tamaño de cada chunk en caracteres (default: {DEFAULT_CHUNK_SIZE})")
+    ap.add_argument("--chunk-overlap", type=int, default=DEFAULT_CHUNK_OVERLAP,
+                    help=f"Solapamiento entre chunks consecutivos (default: {DEFAULT_CHUNK_OVERLAP})")
+    ap.add_argument("--no-chunk", action="store_true",
+                    help="Desactivar chunking (cada archivo/JSONL entry = un documento)")
     args = ap.parse_args()
 
     # 1) Carga
-    docs = read_txt_dir(args.input) if args.input else read_jsonl(args.jsonl, args.date_field)
+    if args.input:
+        docs = read_txt_dir(args.input)
+    elif args.pdf:
+        docs = read_pdf_dir(args.pdf)
+    else:
+        docs = read_jsonl(args.jsonl, args.date_field)
     if not docs:
         print("No se encontraron documentos para indexar.")
         return
+
+    # 1b) Chunking
+    if not args.no_chunk:
+        pre_count = len(docs)
+        docs = chunk_documents(docs, args.chunk_size, args.chunk_overlap)
+        print(f"Chunking: {pre_count} documentos → {len(docs)} chunks "
+              f"(size={args.chunk_size}, overlap={args.chunk_overlap})")
+    else:
+        print(f"Chunking desactivado. {len(docs)} documentos sin dividir.")
 
     # 2) Embeddings locales
     hf = HuggingFaceEmbeddings(model_name=args.model, encode_kwargs={"normalize_embeddings": True})
