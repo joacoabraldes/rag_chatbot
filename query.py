@@ -1,70 +1,16 @@
 # -*- coding: utf-8 -*-
-import os, json, datetime, math, argparse
+import os, datetime, argparse
 from typing import List, Dict, Tuple, Any, Optional
 import chromadb
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from openai import OpenAI
 
-# ========= Funciones utilitarias =========
-
-def load_prompt(path: str) -> str:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-    except Exception:
-        return (
-            "Eres un asistente que responde SOLO con el CONTEXTO provisto.\n"
-            "Puedes sintetizar y combinar fragmentos del contexto.\n"
-            "Si falta información crítica para responder con precisión, di exactamente:\n"
-            "\"No se puede responder con el contexto disponible.\"\n\n"
-            "=== CONTEXTO ===\n{context}\n\n=== PREGUNTA ===\n{question}\n"
-        )
-
-def recency_score(d: Optional[datetime.date], today: datetime.date, half_life_days: int) -> float:
-    if not d:
-        return 0.0
-    age_days = max(0, (today - d).days)
-    return math.exp(-age_days / max(1, half_life_days))
-
-def sim_from_distance(dist: float) -> float:
-    return 1.0 / (1.0 + dist)
-
-def combined_score(dist: float, date_: Optional[datetime.date], today: datetime.date,
-                   weight: float, half_life_days: int) -> float:
-    s = sim_from_distance(dist)
-    r = recency_score(date_, today, half_life_days)
-    return (1.0 - weight) * s + weight * r
-
-def parse_date_iso(md: Dict[str, Any]) -> Optional[datetime.date]:
-    s = md.get("date_iso")
-    if not isinstance(s, str):
-        return None
-    try:
-        y, m, d = map(int, s[:10].split("-"))
-        return datetime.date(y, m, d)
-    except Exception:
-        return None
-
-def expand_queries(q: str) -> list[str]:
-    q = q.strip()
-    expansions = {q}
-    lower = q.lower()
-    if "régimen" in lower and ("monetario" in lower or "cambiario" in lower):
-        expansions |= {
-            lower.replace("monetario", "cambiario"),
-            lower.replace("régimen", "esquema"),
-            "crawling peg", "crawling-peg", "deslizamiento cambiario",
-            "bandas cambiarias", "ancla nominal", "programa monetario",
-            "liberalización cambiaria", "CEPO", "crawling",
-        }
-    if "abril" in lower:
-        expansions |= {"mediados de abril", "segunda quincena de abril"}
-    return [q] + [e for e in expansions if e != q]
-
-def short_preview(t: str, n=200):
-    t = " ".join(t.split())
-    return t[:n] + "…" if len(t) > n else t
+from rag_utils import (
+    load_prompt, recency_score, sim_from_distance, combined_score,
+    parse_date_iso, expand_queries_simple, expand_queries_llm,
+    short_preview,
+)
 
 # ========= Main =========
 
@@ -82,6 +28,8 @@ def main():
     p.add_argument("--min-date", default="")
     p.add_argument("--fetch-factor", type=float, default=2.0)
     p.add_argument("--use-query-expansion", action="store_true")
+    p.add_argument("--llm-expansion", action="store_true",
+                   help="Use LLM to generate query expansions (requires OpenAI key)")
     p.add_argument("--prompt", default="./prompt_template.txt")
     p.add_argument("--list", action="store_true", help="Listar colecciones disponibles")
     args = p.parse_args()
@@ -103,8 +51,10 @@ def main():
 
     # Recuperación
     queries = [args.query]
-    if args.use_query_expansion:
-        queries = expand_queries(args.query)
+    if args.llm_expansion:
+        queries = expand_queries_llm(args.query, openai_model=args.openai_model)
+    elif args.use_query_expansion:
+        queries = expand_queries_simple(args.query)
 
     ks = [max(1, args.k // len(cols)) for _ in cols]
     fetch_k_each = [max(5, int(k * args.fetch_factor)) for k in ks]

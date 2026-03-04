@@ -11,261 +11,18 @@ from openai import OpenAI
 import re, unicodedata
 import langdetect
 
-# ========= Utils =========
-import unicodedata, re
-
-def clean_text(s: str) -> str:
-    # normaliza unicode y limpia caracteres que rompen el render
-    s = unicodedata.normalize("NFKC", s)
-    s = s.replace("\u00A0", " ")       # NBSP
-    s = s.replace("\u00AD", "")        # soft hyphen
-    s = s.replace("\u200B", "")        # zero width space
-    s = re.sub(r"[ \t]+", " ", s)      # colapsa espacios
-    # evita que ## o * activen markdown si terminás usando markdown
-    s = s.replace("#", "＃").replace("*", "＊").replace("_", "﹎")
-    return s
-
-def clean_keep_ascii_marks(s: str) -> str:
-    # versión que solo normaliza sin reemplazar #/*/_ (útil para markdown escapado)
-    s = unicodedata.normalize("NFKC", s)
-    s = s.replace("\u00A0", " ").replace("\u00AD", "").replace("\u200B", "")
-    s = re.sub(r"[ \t]+", " ", s)
-    return s
-
-_MD_SPECIALS = r"\`*_{}[]()#+\-.!|>"
-
-def escape_markdown(s: str) -> str:
-    s = unicodedata.normalize("NFKC", s).replace("\u00A0", " ")
-    return re.sub(r"([\\`*_{}\[\]()#+\-.!|>])", r"\\\1", s)
-
-def normalize_plain(s: str) -> str:
-    s = unicodedata.normalize("NFKC", s).replace("\u00A0", " ")
-    return s
-""
-DATE_TEXT_PATTERNS = [
-    # 15-10-2025 / 15/10/2025 / 15.10.2025
-    re.compile(r"(?P<d>[0-3]?\d)[\-\/\.](?P<m>[01]?\d)[\-\/\.](?P<y>\d{4})"),
-    # 2025-10-15
-    re.compile(r"(?P<y>\d{4})[\-\/\.](?P<m>[01]?\d)[\-\/\.](?P<d>[0-3]?\d)"),
-]
-
-def normalize_iso(y:int,m:int,d:int) -> str:
-    return f"{y:04d}-{m:02d}-{d:02d}"
-
-def extract_date_from_text(text: str) -> Optional[str]:
-    t = text.lower()
-    # nombres de meses en español
-    meses = {"enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
-             "julio":7,"agosto":8,"septiembre":9,"setiembre":9,"octubre":10,
-             "noviembre":11,"diciembre":12}
-    # 1) números
-    for pat in DATE_TEXT_PATTERNS:
-        m = pat.search(t)
-        if m:
-            y = int(m.group("y")); mth = int(m.group("m")); d = int(m.group("d"))
-            return normalize_iso(y,mth,d)
-    # 2) “15 de octubre de 2025”
-    m = re.search(r"(?P<d>[0-3]?\d)\s+de\s+(?P<mes>\w+)\s+de\s+(?P<y>\d{4})", t)
-    if m:
-        d = int(m.group("d")); y=int(m.group("y"))
-        mes_name = m.group("mes")
-        if mes_name in meses:
-            return normalize_iso(y, meses[mes_name], d)
-    return None
-
-KEYWORDS_ANY = ["mep","ccl","mulc","oficial","contado con liqui","dólar","dolar","blue","brecha"]
-def keyword_score(text: str) -> int:
-    tl = text.lower()
-    return sum(1 for kw in KEYWORDS_ANY if kw in tl)
-
-def now_iso() -> str:
-    return datetime.datetime.now().isoformat()
-
-def load_prompt(path: str) -> str:
-    """Plantilla segura: sintetiza SOLO con el contexto; si falta info, resp. fija."""
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            return fh.read()
-    except Exception:
-        return (
-            "Eres un asistente que responde SOLO con el CONTEXTO provisto.\n"
-            "Puedes sintetizar y combinar fragmentos del contexto.\n"
-            "Si falta información crítica para responder con precisión, di exactamente:\n"
-            "\"No se puede responder con el contexto disponible.\"\n\n"
-            "=== CONTEXTO ===\n{context}\n\n=== PREGUNTA ===\n{question}\n"
-        )
-
-SOURCE_KEYS = ["rel_path", "source", "file", "filename", "doc", "title", "name", "path", "uri", "url", "id"]
-PAGE_KEYS   = ["page", "page_number", "pageIndex", "page_num", "pageno", "pageNo"]
-
-def best_source_name(md: Dict[str, Any]) -> str:
-    import os as _os
-    for k in SOURCE_KEYS:
-        v = md.get(k)
-        if isinstance(v, str) and v.strip():
-            try:
-                return _os.path.basename(v) or v
-            except Exception:
-                return v
-    return "desconocido"
-
-def best_page(md: Dict[str, Any]) -> Optional[str]:
-    for k in PAGE_KEYS:
-        v = md.get(k)
-        if v not in (None, ""):
-            return str(v)
-    return None
-
-def parse_date_iso(md: Dict[str, Any]) -> Optional[datetime.date]:
-    s = md.get("date_iso")
-    if not isinstance(s, str):
-        return None
-    try:
-        y, m, d = map(int, s[:10].split("-"))
-        return datetime.date(y, m, d)
-    except Exception:
-        return None
-
-def recency_score(d: Optional[datetime.date], today: datetime.date, half_life_days: int) -> float:
-    """1.0 = hoy, decae exponencialmente con 'half_life_days'."""
-    if not d:
-        return 0.0
-    age_days = max(0, (today - d).days)
-    return math.exp(-age_days / max(1, half_life_days))
-
-def sim_from_distance(dist: float) -> float:
-    """convierte distancia (menor=mejor) en similitud ~[0..1)."""
-    return 1.0 / (1.0 + dist)
-
-def combined_score(dist: float, date_: Optional[datetime.date], today: datetime.date,
-                   weight: float, half_life_days: int) -> float:
-    """score final = (1-w)*sim + w*recency (mayor es mejor)."""
-    s = sim_from_distance(dist)
-    r = recency_score(date_, today, half_life_days)
-    w = max(0.0, min(1.0, weight))
-    return (1.0 - w) * s + w * r
-
-def format_source_tag(md: Dict[str, Any]) -> str:
-    col = md.get("_collection", "?")
-    name = best_source_name(md)
-    page = best_page(md)
-    chunk_id = md.get("chunk_id")
-    start = md.get("chunk_start"); end = md.get("chunk_end")
-    tag = f"{col}) {name}"
-    if page: tag += f"#{page}"
-    if chunk_id is not None:
-        tag += f"  [chunk:{chunk_id}"
-        if start is not None and end is not None:
-            tag += f" @ {start}:{end}"
-        tag += "]"
-    d = md.get("date_iso")
-    if d: tag += f"  (fecha: {d})"
-    return tag
-
-def short_preview(text: str, n: int = 240) -> str:
-    t = " ".join(text.split())
-    return (t[:n] + "…") if len(t) > n else t
-
-def similarity_search_with_score(vdb: Chroma, query: str, k: int):
-    return vdb.similarity_search_with_score(query, k=k)
-
-def split_k_across(n_items: int, k: int) -> List[int]:
-    base = k // n_items; rem = k % n_items
-    sizes = [base] * n_items
-    for i in range(rem): sizes[i] += 1
-    return sizes
-
-def save_history(path: str, record: dict):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-def expand_queries(q: str) -> list[str]:
-    """Expansión simple para español (sinónimos/variantes macro)."""
-    base = q.strip()
-    expansions = {base}
-    lower = base.lower()
-    if "régimen" in lower and ("monetario" in lower or "cambiario" in lower):
-        expansions |= {
-            lower.replace("monetario", "cambiario"),
-            lower.replace("régimen", "esquema"),
-            "crawling peg", "crawling-peg", "deslizamiento cambiario",
-            "bandas cambiarias", "ancla nominal", "programa monetario",
-            "liberalización cambiaria", "CEPO", "crawling",
-        }
-    if "abril" in lower:
-        expansions |= {"mediados de abril", "segunda quincena de abril"}
-    # expansión genérica para cotizaciones
-    dollar_types = {"dólar", "dolar", "dollar"}
-    if dollar_types & set(lower.split()):
-        expansions |= {"dólar oficial", "dólar MEP", "dólar CCL", "dólar blue",
-                       "contado con liquidación", "cotización del dólar",
-                       "tipo de cambio", "MULC"}
-    return [base] + [e for e in expansions if e != base]
-
-
-def deduplicate_candidates(candidates: list, content_window: int = 150) -> list:
-    """Deduplica chunks por contenido + fuente para evitar resultados repetidos."""
-    seen = set()
-    unique = []
-    for doc, dist in candidates:
-        key = (
-            doc.page_content[:content_window],
-            doc.metadata.get("rel_path", ""),
-            doc.metadata.get("chunk_id", ""),
-        )
-        if key not in seen:
-            seen.add(key)
-            unique.append((doc, dist))
-    return unique
-
-
-def assess_confidence(top_results: list, sim_threshold: float = 0.35,
-                      min_good_results: int = 2) -> dict:
-    """Evalúa si el contexto recuperado es suficiente para responder con confianza.
-
-    Returns dict with:
-      - confident: bool
-      - reason: str (human-readable explanation)
-      - avg_sim: float
-      - good_count: int (results above threshold)
-    """
-    if not top_results:
-        return {"confident": False, "reason": "no_results",
-                "avg_sim": 0.0, "good_count": 0}
-
-    sims = [sim_from_distance(dist) for (_, dist, _) in top_results]
-    avg_sim = sum(sims) / len(sims)
-    good_count = sum(1 for s in sims if s >= sim_threshold)
-
-    if good_count < min_good_results:
-        return {"confident": False, "reason": "low_relevance",
-                "avg_sim": avg_sim, "good_count": good_count}
-
-    return {"confident": True, "reason": "ok",
-            "avg_sim": avg_sim, "good_count": good_count}
-
-
-def build_confidence_note(conf: dict) -> str:
-    """Genera nota para incluir en el prompt cuando la confianza es baja."""
-    if conf["confident"]:
-        return ""
-    if conf["reason"] == "no_results":
-        return ("\n\n⚠️ NOTA INTERNA: No se encontraron resultados relevantes en los documentos. "
-                "Indicá que no hay información disponible y preguntá "
-                "al usuario si puede reformular la pregunta o dar más detalles "
-                "(período, región, indicador específico, etc.).")
-    if conf["reason"] == "low_relevance":
-        return (f"\n\n⚠️ NOTA INTERNA: Solo {conf['good_count']} fragmentos tienen "
-                f"relevancia aceptable (similitud promedio: {conf['avg_sim']:.2f}). "
-                "La información podría ser parcial. Respondé con lo que tengas "
-                "pero advertí al usuario y pedile que precise su consulta "
-                "(ej: país, período, indicador específico).")
-    return ""
+from rag_utils import (
+    clean_text, clean_keep_ascii_marks, escape_markdown, normalize_plain,
+    extract_date_from_text, parse_date_iso, recency_score, sim_from_distance,
+    combined_score, format_source_tag, short_preview, deduplicate_candidates,
+    assess_confidence, build_confidence_note, load_prompt, save_history,
+    expand_queries_llm, expand_queries_simple, split_k_across, now_iso,
+    best_source_name, best_page, boost_keywords, build_context,
+    contextualize_query,
+)
 
 # ========= App =========
 
-# Título que pediste
 st.set_page_config(page_title="PARROT RAG", layout="wide")
 st.title("🦜 PARROT RAG — say stupidities in a fancy way")
 
@@ -274,6 +31,9 @@ DEFAULT_EMBED     = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/par
 DEFAULT_OAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 PROMPT_PATH       = os.environ.get("PROMPT_TEMPLATE", "./prompt_template.txt")
 DEFAULT_HISTORY   = "./history/chat_history.jsonl"
+
+# How many past messages (user+assistant pairs) to include in the LLM context
+MAX_HISTORY_PAIRS = 5
 
 # ----- Sidebar -----
 st.sidebar.header("⚙️ Configuración")
@@ -301,9 +61,14 @@ min_date_str      = st.sidebar.text_input("Filtrar desde fecha (YYYY-MM-DD)", va
 
 st.sidebar.markdown("### 🔎 Recuperación avanzada")
 fetch_factor          = st.sidebar.slider("Fetch factor", 1.0, 4.0, 2.0, 0.5)
-use_query_expansion   = st.sidebar.checkbox("Usar expansión de consulta", value=True)
+use_query_expansion   = st.sidebar.checkbox("Usar expansión de consulta (simple)", value=False)
+use_llm_expansion     = st.sidebar.checkbox("Usar expansión de consulta (LLM)", value=True)
 confidence_threshold  = st.sidebar.slider("Umbral de similitud (confianza)", 0.1, 0.8, 0.35, 0.05)
 min_good_results      = st.sidebar.number_input("Mín. fragmentos relevantes", min_value=1, max_value=10, value=2, step=1)
+
+st.sidebar.markdown("### 💬 Memoria conversacional")
+use_memory = st.sidebar.checkbox("Enviar historial al LLM (multi-turn)", value=True)
+max_history = st.sidebar.slider("Pares de mensajes a enviar", 1, 15, MAX_HISTORY_PAIRS, 1)
 
 render_plain = st.sidebar.checkbox("Render respuesta como texto plano", value=False)
 st.sidebar.markdown("---")
@@ -336,6 +101,41 @@ for m in st.session_state.messages:
                     st.text(clean_text(s))
 
 
+# ----- Helper: build conversation history for OpenAI -----
+def build_chat_messages(system_prompt: str, user_input: str, max_pairs: int) -> list:
+    """Build the messages list including conversation history for multi-turn.
+
+    Includes up to *max_pairs* previous user/assistant exchanges so the LLM
+    can resolve follow-up questions like "tell me more" or "what about X?".
+    """
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # Gather previous turns (skip the current one which hasn't been appended yet)
+    history = st.session_state.messages
+    # Take the last N pairs (user + assistant = 2 messages per pair)
+    recent = history[-(max_pairs * 2):]
+
+    for msg in recent:
+        role = msg["role"]
+        if role in ("user", "assistant"):
+            messages.append({"role": role, "content": msg["content"]})
+
+    # Current user question
+    messages.append({"role": "user", "content": user_input})
+    return messages
+
+
+# ----- Parse min_date from sidebar -----
+def parse_min_date(s: str) -> Optional[datetime.date]:
+    if not s or not s.strip():
+        return None
+    try:
+        y, m, d = map(int, s.strip()[:10].split("-"))
+        return datetime.date(y, m, d)
+    except Exception:
+        return None
+
+
 # ----- Interacción -----
 user_input = st.chat_input("Escribí tu pregunta...")
 if user_input and selected_cols:
@@ -346,7 +146,20 @@ if user_input and selected_cols:
 
     # Recuperación
     with st.spinner("Buscando contexto..."):
-        target_iso = extract_date_from_text(user_input)
+        # --- Query contextualisation (multi-turn) ---
+        # Rewrite vague follow-ups ("contame más", "un resumen") into
+        # self-contained queries using the conversation history so that
+        # the vector search retrieves the right documents.
+        search_query = user_input
+        if use_memory and st.session_state.messages:
+            search_query = contextualize_query(
+                user_input,
+                st.session_state.messages,
+                openai_model=openai_model,
+                max_pairs=max_history,
+            )
+
+        target_iso = extract_date_from_text(search_query)
         target_date = None
         if target_iso:
             try:
@@ -355,14 +168,25 @@ if user_input and selected_cols:
             except Exception:
                 target_date = None
 
+        # Parse the min_date filter from sidebar (BUG FIX: was previously unused)
+        min_date = parse_min_date(min_date_str)
+
         ks = split_k_across(len(selected_cols), k_total)
         fetch_k_each = [max(5, int(k * fetch_factor)) for k in ks]
         candidates_all = []
 
+        # Determine query expansion strategy
+        if use_llm_expansion:
+            queries = expand_queries_llm(search_query, openai_model=openai_model)
+        elif use_query_expansion:
+            queries = expand_queries_simple(search_query)
+        else:
+            queries = [search_query]
+
         for (col, vdb), k_each in zip(vectordbs.items(), fetch_k_each):
             if k_each <= 0:
                 continue
-            for qexp in expand_queries(user_input) if use_query_expansion else [user_input]:
+            for qexp in queries:
                 for doc, dist in vdb.similarity_search_with_score(qexp, k=k_each):
                     md = dict(doc.metadata or {})
                     md["_collection"] = col
@@ -371,6 +195,13 @@ if user_input and selected_cols:
 
         # Deduplication
         candidates_all = deduplicate_candidates(candidates_all)
+
+        # Apply min_date filter (BUG FIX)
+        if min_date:
+            candidates_all = [
+                (doc, dist) for doc, dist in candidates_all
+                if not parse_date_iso(doc.metadata) or parse_date_iso(doc.metadata) >= min_date
+            ]
 
         filtered = []
         if target_date:
@@ -381,11 +212,6 @@ if user_input and selected_cols:
                     filtered.append((doc, dist))
         else:
             filtered = candidates_all
-
-        def boost_keywords(text: str) -> float:
-            boost_terms = ["mep", "ccl", "mulc", "tipo de cambio", "dólar", "cotización", "oficial"]
-            text_l = text.lower()
-            return 0.10 * sum(kw in text_l for kw in boost_terms)
 
         scored = []
         today = datetime.date.today()
@@ -413,18 +239,24 @@ if user_input and selected_cols:
             context=context, question=user_input
         ) + confidence_note
 
-
-    # LLM OpenAI (system_prompt ya existe en este scope)
+    # LLM call with multi-turn conversation memory
     with st.spinner("Consultando OpenAI..."):
         try:
             client_oa = OpenAI()
+
+            # Build messages: include history if memory is enabled
+            if use_memory:
+                messages = build_chat_messages(system_prompt, user_input, max_history)
+            else:
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_input},
+                ]
+
             resp = client_oa.chat.completions.create(
                 model=openai_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_input}
-                ],
-                temperature=temperature
+                messages=messages,
+                temperature=temperature,
             )
             answer = resp.choices[0].message.content
         except Exception as e:
@@ -452,9 +284,9 @@ if user_input and selected_cols:
                         f"similitud promedio: {confidence['avg_sim']:.2f}). "
                         "Considerá reformular o dar más detalles.")
         if render_plain:
-            st.text(normalize_plain(answer))  # texto plano
+            st.text(normalize_plain(answer))
         else:
-            st.markdown(escape_markdown(answer))  # markdown escapado
+            st.markdown(escape_markdown(answer))
         if show_sources and sources:
             with st.expander("Fuentes"):
                 for s in sources:
@@ -464,7 +296,7 @@ if user_input and selected_cols:
         "role": "assistant",
         "content": answer,
         "sources": sources,
-        "collections": selected_cols
+        "collections": selected_cols,
     })
 
     # Guardar historial
@@ -482,6 +314,8 @@ if user_input and selected_cols:
         "recency_half_life": recency_half_life,
         "min_date": min_date_str,
         "confidence": confidence,
+        "expansion_mode": "llm" if use_llm_expansion else ("simple" if use_query_expansion else "none"),
+        "memory_enabled": use_memory,
     }
     save_history(history_path, record)
 
