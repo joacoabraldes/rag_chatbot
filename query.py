@@ -20,7 +20,7 @@ def main():
     p.add_argument("--persist", default="./chroma_db", help="Ruta de la base de Chroma")
     p.add_argument("--collections", nargs="+", help="Colecciones a usar")
     p.add_argument("--k", type=int, default=10, help="Cantidad total de documentos")
-    p.add_argument("--embed-model", default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+    p.add_argument("--embed-model", default="BAAI/bge-m3")
     p.add_argument("--openai-model", default="gpt-4o-mini")
     p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--recency-weight", type=float, default=0.35)

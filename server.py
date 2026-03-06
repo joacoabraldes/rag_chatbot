@@ -19,7 +19,7 @@ DB_DIR = os.environ.get("CHROMA_DB_DIR", "./chroma_db")
 PROMPT_PATH = os.environ.get("PROMPT_TEMPLATE", "./prompt_template.txt")
 DEFAULT_EMBED = os.environ.get(
     "EMBEDDING_MODEL",
-    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "BAAI/bge-m3",
 )
 
 

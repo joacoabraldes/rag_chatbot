@@ -10,6 +10,12 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 import chromadb
 
 try:
+    from langchain_experimental.text_splitter import SemanticChunker
+    HAS_SEMANTIC = True
+except ImportError:
+    HAS_SEMANTIC = False
+
+try:
     import pypdf
     HAS_PYPDF = True
 except ImportError:
@@ -189,7 +195,7 @@ def main():
                     help="Directorio de persistencia de Chroma")
     ap.add_argument("--collection", default="docs", help="Nombre de la colección")
     ap.add_argument("--model", default=os.environ.get("EMBEDDING_MODEL",
-                    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"))
+                    "BAAI/bge-m3"))
     ap.add_argument("--batch-size", type=int, default=1000, help="Lote (< 5461)")
     ap.add_argument("--date-field", default=None,
                     help="Nombre de campo en metadata que contiene la fecha (si existe). Si no, se infiere del filename.")
@@ -199,6 +205,10 @@ def main():
                     help=f"Solapamiento entre chunks consecutivos (default: {DEFAULT_CHUNK_OVERLAP})")
     ap.add_argument("--no-chunk", action="store_true",
                     help="Desactivar chunking (cada archivo/JSONL entry = un documento)")
+    ap.add_argument("--semantic-chunk", action="store_true",
+                    help="Usar chunking semántico en lugar de tamaño fijo")
+    ap.add_argument("--semantic-threshold", type=int, default=75,
+                    help="Percentil de umbral para chunking semántico (default: 75)")
     args = ap.parse_args()
 
     # 1) Carga
@@ -215,9 +225,36 @@ def main():
     # 1b) Chunking
     if not args.no_chunk:
         pre_count = len(docs)
-        docs = chunk_documents(docs, args.chunk_size, args.chunk_overlap)
-        print(f"Chunking: {pre_count} documentos → {len(docs)} chunks "
-              f"(size={args.chunk_size}, overlap={args.chunk_overlap})")
+        if args.semantic_chunk:
+            if not HAS_SEMANTIC:
+                print("⚠️ langchain-experimental no instalado. Instalá con: pip install langchain-experimental")
+                print("   Usando chunking por tamaño fijo como fallback.")
+                docs = chunk_documents(docs, args.chunk_size, args.chunk_overlap)
+            else:
+                hf_chunker = HuggingFaceEmbeddings(
+                    model_name=args.model,
+                    encode_kwargs={"normalize_embeddings": True},
+                )
+                semantic_splitter = SemanticChunker(
+                    hf_chunker,
+                    breakpoint_threshold_type="percentile",
+                    breakpoint_threshold_amount=args.semantic_threshold,
+                )
+                chunked = []
+                for doc in docs:
+                    splits = semantic_splitter.split_text(doc.page_content)
+                    for ci, piece in enumerate(splits):
+                        md = dict(doc.metadata)
+                        md["chunk_id"] = ci
+                        md["chunk_total"] = len(splits)
+                        chunked.append(Document(page_content=piece, metadata=md))
+                docs = chunked
+                print(f"Semantic chunking: {pre_count} documentos → {len(docs)} chunks "
+                      f"(threshold={args.semantic_threshold}%)")
+        else:
+            docs = chunk_documents(docs, args.chunk_size, args.chunk_overlap)
+            print(f"Chunking: {pre_count} documentos → {len(docs)} chunks "
+                  f"(size={args.chunk_size}, overlap={args.chunk_overlap})")
     else:
         print(f"Chunking desactivado. {len(docs)} documentos sin dividir.")
 

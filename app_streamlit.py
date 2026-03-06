@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, json, datetime, math
+import os, json, datetime, math, pathlib, uuid, tempfile
 from typing import List, Tuple, Dict, Any, Optional
 from dotenv import load_dotenv
 load_dotenv()
@@ -11,6 +11,12 @@ from openai import OpenAI
 import re, unicodedata
 import langdetect
 
+try:
+    import pypdf
+    HAS_PYPDF = True
+except ImportError:
+    HAS_PYPDF = False
+
 from rag_utils import (
     clean_text, clean_keep_ascii_marks, escape_markdown, normalize_plain,
     extract_date_from_text, parse_date_iso, recency_score, sim_from_distance,
@@ -20,6 +26,12 @@ from rag_utils import (
     best_source_name, best_page, boost_keywords, build_context,
     contextualize_query,
 )
+from ingest import (
+    chunk_documents, infer_date_iso, try_parse_date_from_string,
+    DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP,
+)
+from langchain_core.documents import Document
+from langchain_experimental.text_splitter import SemanticChunker
 
 # ========= App =========
 
@@ -27,7 +39,7 @@ st.set_page_config(page_title="PARROT RAG", layout="wide")
 st.title("🦜 PARROT RAG — say stupidities in a fancy way")
 
 DEFAULT_PERSIST   = os.environ.get("CHROMA_DB_DIR", "./chroma_db")
-DEFAULT_EMBED     = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+DEFAULT_EMBED     = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-m3")
 DEFAULT_OAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 PROMPT_PATH       = os.environ.get("PROMPT_TEMPLATE", "./prompt_template.txt")
 DEFAULT_HISTORY   = "./history/chat_history.jsonl"
@@ -87,6 +99,110 @@ def get_vectordb(persist_path: str, collection_name: str, embedder):
 
 embedder = get_embedder(embed_model)
 vectordbs = {col: get_vectordb(persist_dir, col, embedder) for col in selected_cols}
+
+# ----- File Upload & Ingestion -----
+st.sidebar.markdown("### 📄 Subir documentos")
+upload_collection = st.sidebar.text_input("Colección destino", value=collections[0] if collections else "docs")
+use_semantic_chunking = st.sidebar.checkbox("Usar chunking semántico", value=True)
+uploaded_files = st.sidebar.file_uploader(
+    "Subir .txt o .pdf",
+    type=["txt", "pdf"],
+    accept_multiple_files=True,
+)
+
+if uploaded_files and st.sidebar.button("📥 Ingestar documentos"):
+    with st.sidebar:
+        with st.spinner("Procesando e ingiriendo..."):
+            ingest_embedder = get_embedder(embed_model)
+            ingest_client = chromadb.PersistentClient(path=persist_dir)
+            ingest_vdb = Chroma(
+                client=ingest_client,
+                collection_name=upload_collection,
+                embedding_function=ingest_embedder,
+            )
+
+            all_docs: List[Document] = []
+            for uf in uploaded_files:
+                file_name = uf.name
+                if file_name.lower().endswith(".txt"):
+                    text = uf.read().decode("utf-8", errors="ignore")
+                    meta = {"source": file_name, "rel_path": file_name, "chunk_id": None}
+                    di = infer_date_iso(meta, None)
+                    if di:
+                        meta["date_iso"] = di
+                    all_docs.append(Document(page_content=text, metadata=meta))
+
+                elif file_name.lower().endswith(".pdf"):
+                    if not HAS_PYPDF:
+                        st.error("Se requiere 'pypdf' para PDFs. Instalá con: pip install pypdf")
+                        continue
+                    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                        tmp.write(uf.read())
+                        tmp_path = tmp.name
+                    try:
+                        reader = pypdf.PdfReader(tmp_path)
+                        parts = []
+                        for page in reader.pages:
+                            page_text = (page.extract_text() or "").strip()
+                            if page_text:
+                                parts.append(page_text)
+                        full_text = "\n\n".join(parts)
+                        if not full_text.strip():
+                            st.warning(f"⚠️ {file_name}: no se pudo extraer texto")
+                            continue
+                        meta = {
+                            "source": file_name,
+                            "rel_path": file_name,
+                            "chunk_id": None,
+                            "total_pages": len(reader.pages),
+                        }
+                        di = infer_date_iso(meta, None)
+                        if di:
+                            meta["date_iso"] = di
+                        all_docs.append(Document(page_content=full_text, metadata=meta))
+                    finally:
+                        os.unlink(tmp_path)
+
+            if not all_docs:
+                st.warning("No se encontraron documentos válidos.")
+            else:
+                # Chunking
+                if use_semantic_chunking:
+                    semantic_splitter = SemanticChunker(
+                        ingest_embedder,
+                        breakpoint_threshold_type="percentile",
+                        breakpoint_threshold_amount=75,
+                    )
+                    chunked_docs: List[Document] = []
+                    for doc in all_docs:
+                        splits = semantic_splitter.split_text(doc.page_content)
+                        for ci, piece in enumerate(splits):
+                            md = dict(doc.metadata)
+                            md["chunk_id"] = ci
+                            md["chunk_total"] = len(splits)
+                            chunked_docs.append(Document(page_content=piece, metadata=md))
+                    all_docs = chunked_docs
+                else:
+                    all_docs = chunk_documents(all_docs, DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP)
+
+                # Ingest into ChromaDB
+                texts = [d.page_content for d in all_docs]
+                metas = [d.metadata for d in all_docs]
+                ids = [str(uuid.uuid4()) for _ in all_docs]
+
+                batch_size = 500
+                for i in range(0, len(texts), batch_size):
+                    ingest_vdb.add_texts(
+                        texts=texts[i:i+batch_size],
+                        metadatas=metas[i:i+batch_size],
+                        ids=ids[i:i+batch_size],
+                    )
+
+                st.success(f"✅ {len(all_docs)} chunks ingresados en '{upload_collection}'")
+
+                # Clear caches so the new collection/docs appear
+                get_vectordb.clear()
+                st.rerun()
 
 # ----- Chat render previo -----
 if "messages" not in st.session_state:

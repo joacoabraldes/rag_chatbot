@@ -12,3 +12,5 @@ langchain-chroma>=0.1.0
 langchain-huggingface>=0.1.0
 streamlit>=1.38.0
 langdetect>=1.0.9
+langchain-experimental>=0.0.61
+pypdf>=4.0.0
