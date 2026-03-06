@@ -38,6 +38,17 @@ from langchain_experimental.text_splitter import SemanticChunker
 st.set_page_config(page_title="PARROT RAG", layout="wide")
 st.title("🦜 PARROT RAG — say stupidities in a fancy way")
 
+# Custom CSS for better UX
+st.markdown("""
+<style>
+.stChatMessage { max-width: 90%; }
+.feedback-btn { display: inline-block; cursor: pointer; font-size: 1.3rem; margin-right: 8px; opacity:0.6; }
+.feedback-btn:hover { opacity:1; }
+.suggested-q { padding: 8px 16px; border: 1px solid #444; border-radius: 18px;
+    display: inline-block; margin: 4px 6px; cursor: pointer; font-size: 0.9rem; }
+</style>
+""", unsafe_allow_html=True)
+
 DEFAULT_PERSIST   = os.environ.get("CHROMA_DB_DIR", "./chroma_db")
 DEFAULT_EMBED     = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-m3")
 DEFAULT_OAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
@@ -57,33 +68,55 @@ if not collections:
     st.sidebar.warning("No hay colecciones. Ingestá documentos con ingest.py")
 
 selected_cols = st.sidebar.multiselect("Colecciones a consultar", options=collections, default=collections[:1] if collections else [])
-k_total      = st.sidebar.slider("Top-k total", 1, 30, 10, 1)
-temperature  = st.sidebar.slider("Temperature (OpenAI)", 0.0, 1.0, 0.0, 0.1)
-openai_model = st.sidebar.text_input("Modelo OpenAI", value=DEFAULT_OAI_MODEL)
-embed_model  = st.sidebar.text_input("Modelo de Embeddings (HF)", value=DEFAULT_EMBED)
-history_path = st.sidebar.text_input("Archivo de historial (JSONL)", value=DEFAULT_HISTORY)
-show_sources = st.sidebar.checkbox("Mostrar fuentes", value=True)
-show_scores  = st.sidebar.checkbox("Mostrar score", value=False)
-show_preview = st.sidebar.checkbox("Mostrar preview", value=True)
 
-st.sidebar.markdown("### 🗓️ Recencia")
-recency_weight    = st.sidebar.slider("Peso de recencia", 0.0, 1.0, 0.35, 0.05)
-recency_half_life = st.sidebar.number_input("Half-life (días)", min_value=1, max_value=365, value=30, step=1)
-min_date_str      = st.sidebar.text_input("Filtrar desde fecha (YYYY-MM-DD)", value="")
+with st.sidebar.expander("🤖 Modelos y respuesta", expanded=False):
+    k_total      = st.slider("Top-k total", 1, 30, 10, 1)
+    temperature  = st.slider("Temperature (OpenAI)", 0.0, 1.0, 0.0, 0.1)
+    openai_model = st.text_input("Modelo OpenAI", value=DEFAULT_OAI_MODEL)
+    embed_model  = st.text_input("Modelo de Embeddings (HF)", value=DEFAULT_EMBED)
+    show_sources = st.checkbox("Mostrar fuentes", value=True)
+    show_scores  = st.checkbox("Mostrar score", value=False)
+    show_preview = st.checkbox("Mostrar preview", value=True)
+    render_plain = st.checkbox("Render respuesta como texto plano", value=False)
 
-st.sidebar.markdown("### 🔎 Recuperación avanzada")
-fetch_factor          = st.sidebar.slider("Fetch factor", 1.0, 4.0, 2.0, 0.5)
-use_query_expansion   = st.sidebar.checkbox("Usar expansión de consulta (simple)", value=False)
-use_llm_expansion     = st.sidebar.checkbox("Usar expansión de consulta (LLM)", value=True)
-confidence_threshold  = st.sidebar.slider("Umbral de similitud (confianza)", 0.1, 0.8, 0.35, 0.05)
-min_good_results      = st.sidebar.number_input("Mín. fragmentos relevantes", min_value=1, max_value=10, value=2, step=1)
+with st.sidebar.expander("🗓️ Recencia", expanded=False):
+    recency_weight    = st.slider("Peso de recencia", 0.0, 1.0, 0.35, 0.05)
+    recency_half_life = st.number_input("Half-life (días)", min_value=1, max_value=365, value=30, step=1)
+    min_date_str      = st.text_input("Filtrar desde fecha (YYYY-MM-DD)", value="")
 
-st.sidebar.markdown("### 💬 Memoria conversacional")
-use_memory = st.sidebar.checkbox("Enviar historial al LLM (multi-turn)", value=True)
-max_history = st.sidebar.slider("Pares de mensajes a enviar", 1, 15, MAX_HISTORY_PAIRS, 1)
+with st.sidebar.expander("🔎 Recuperación avanzada", expanded=False):
+    fetch_factor          = st.slider("Fetch factor", 1.0, 4.0, 2.0, 0.5)
+    use_query_expansion   = st.checkbox("Usar expansión de consulta (simple)", value=False)
+    use_llm_expansion     = st.checkbox("Usar expansión de consulta (LLM)", value=True)
+    confidence_threshold  = st.slider("Umbral de similitud (confianza)", 0.1, 0.8, 0.35, 0.05)
+    min_good_results      = st.number_input("Mín. fragmentos relevantes", min_value=1, max_value=10, value=2, step=1)
 
-render_plain = st.sidebar.checkbox("Render respuesta como texto plano", value=False)
+with st.sidebar.expander("💬 Memoria conversacional", expanded=False):
+    use_memory = st.checkbox("Enviar historial al LLM (multi-turn)", value=True)
+    max_history = st.slider("Pares de mensajes a enviar", 1, 15, MAX_HISTORY_PAIRS, 1)
+    history_path = st.text_input("Archivo de historial (JSONL)", value=DEFAULT_HISTORY)
+
 st.sidebar.markdown("---")
+
+# ----- Clear / Export chat -----
+col_clear, col_export = st.sidebar.columns(2)
+if col_clear.button("🗑️ Limpiar chat", use_container_width=True):
+    st.session_state.messages = []
+    st.session_state.pop("feedback", None)
+    st.rerun()
+if col_export.button("📤 Exportar chat", use_container_width=True):
+    if st.session_state.get("messages"):
+        export_data = json.dumps(st.session_state.messages, ensure_ascii=False, indent=2, default=str)
+        st.sidebar.download_button(
+            label="⬇️ Descargar JSON",
+            data=export_data,
+            file_name=f"chat_export_{datetime.datetime.now():%Y%m%d_%H%M%S}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+    else:
+        st.sidebar.info("No hay mensajes para exportar.")
+
 st.sidebar.caption("Requiere OPENAI_API_KEY en el entorno.")
 
 # ----- Caches -----
@@ -207,12 +240,41 @@ if uploaded_files and st.sidebar.button("📥 Ingestar documentos"):
 # ----- Chat render previo -----
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "feedback" not in st.session_state:
+    st.session_state.feedback = {}  # msg_idx -> "up" | "down"
 
-for m in st.session_state.messages:
+# Suggested questions for onboarding (empty chat)
+if not st.session_state.messages:
+    st.markdown("##### 👋 ¡Hola! Preguntame sobre economía. Algunas ideas:")
+    SUGGESTED = [
+        "¿Cómo está la economía argentina esta semana?",
+        "¿Qué decidió el BCE sobre tasas de interés?",
+        "¿Cuál es la producción actual de la OPEP?",
+        "¿Qué medidas de estímulo tomó China?",
+        "Resumen de la economía de EE.UU.",
+    ]
+    cols_suggested = st.columns(len(SUGGESTED))
+    for idx, q in enumerate(SUGGESTED):
+        if cols_suggested[idx].button(q, key=f"suggested_{idx}", use_container_width=True):
+            st.session_state["_suggested_q"] = q
+            st.rerun()
+
+for midx, m in enumerate(st.session_state.messages):
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
+        if m["role"] == "assistant":
+            # Feedback buttons
+            fb_key = str(midx)
+            fcol1, fcol2, fcol3 = st.columns([0.06, 0.06, 0.88])
+            current_fb = st.session_state.feedback.get(fb_key)
+            if fcol1.button("👍" if current_fb != "up" else "✅", key=f"fb_up_{midx}", help="Buena respuesta"):
+                st.session_state.feedback[fb_key] = "up"
+                st.rerun()
+            if fcol2.button("👎" if current_fb != "down" else "❌", key=f"fb_down_{midx}", help="Mala respuesta"):
+                st.session_state.feedback[fb_key] = "down"
+                st.rerun()
         if show_sources and m.get("sources"):
-            with st.expander("Fuentes"):
+            with st.expander("📚 Fuentes"):
                 for s in m["sources"]:
                     st.text(clean_text(s))
 
@@ -253,7 +315,11 @@ def parse_min_date(s: str) -> Optional[datetime.date]:
 
 
 # ----- Interacción -----
-user_input = st.chat_input("Escribí tu pregunta...")
+# Handle suggested question clicks
+if "_suggested_q" in st.session_state:
+    user_input = st.session_state.pop("_suggested_q")
+else:
+    user_input = st.chat_input("Escribí tu pregunta...")
 if user_input and selected_cols:
     # mensaje del usuario
     st.session_state.messages.append({"role": "user", "content": user_input})
@@ -261,7 +327,9 @@ if user_input and selected_cols:
         st.markdown(user_input)
 
     # Recuperación
-    with st.spinner("Buscando contexto..."):
+    status_container = st.status("Procesando tu pregunta...", expanded=True)
+    with status_container:
+        st.write("🔍 Contextualizando consulta...")
         # --- Query contextualisation (multi-turn) ---
         # Rewrite vague follow-ups ("contame más", "un resumen") into
         # self-contained queries using the conversation history so that
@@ -287,6 +355,7 @@ if user_input and selected_cols:
         # Parse the min_date filter from sidebar (BUG FIX: was previously unused)
         min_date = parse_min_date(min_date_str)
 
+        st.write("📡 Buscando en colecciones...")
         ks = split_k_across(len(selected_cols), k_total)
         fetch_k_each = [max(5, int(k * fetch_factor)) for k in ks]
         candidates_all = []
@@ -337,6 +406,7 @@ if user_input and selected_cols:
             cscore += boost_keywords(doc.page_content)
             scored.append((doc, dist, cscore))
 
+        st.write(f"📊 Ordenando y seleccionando los mejores {k_total} fragmentos...")
         scored.sort(key=lambda x: x[2], reverse=True)
         top = scored[:k_total]
         top_docs = [doc for (doc, _, _) in top]
@@ -355,8 +425,20 @@ if user_input and selected_cols:
             context=context, question=user_input
         ) + confidence_note
 
-    # LLM call with multi-turn conversation memory
-    with st.spinner("Consultando OpenAI..."):
+        st.write("🤖 Generando respuesta...")
+    status_container.update(label="✅ Contexto listo", state="complete", expanded=False)
+
+    # LLM call with streaming
+    with st.chat_message("assistant"):
+        # Confidence indicator (before answer)
+        if not confidence["confident"]:
+            if confidence["reason"] == "no_results":
+                st.warning("⚠️ No se encontraron fragmentos relevantes. La respuesta puede ser limitada.")
+            elif confidence["reason"] == "low_relevance":
+                st.info(f"ℹ️ Contexto parcial ({confidence['good_count']} fragmentos relevantes, "
+                        f"similitud promedio: {confidence['avg_sim']:.2f}). "
+                        "Considerá reformular o dar más detalles.")
+
         try:
             client_oa = OpenAI()
 
@@ -369,42 +451,45 @@ if user_input and selected_cols:
                     {"role": "user", "content": user_input},
                 ]
 
-            resp = client_oa.chat.completions.create(
-                model=openai_model,
-                messages=messages,
-                temperature=temperature,
-            )
-            answer = resp.choices[0].message.content
+            # Streaming response for better UX
+            if render_plain:
+                # Non-streaming fallback for plain text mode
+                resp = client_oa.chat.completions.create(
+                    model=openai_model,
+                    messages=messages,
+                    temperature=temperature,
+                )
+                answer = resp.choices[0].message.content
+                st.text(normalize_plain(answer))
+            else:
+                stream = client_oa.chat.completions.create(
+                    model=openai_model,
+                    messages=messages,
+                    temperature=temperature,
+                    stream=True,
+                )
+                answer = st.write_stream(
+                    (chunk.choices[0].delta.content or ""
+                     for chunk in stream
+                     if chunk.choices[0].delta.content is not None)
+                )
         except Exception as e:
             answer = f"⚠️ Error llamando a OpenAI: {e}"
+            st.error(answer)
 
-    # Fuentes
-    sources = []
-    for i, (doc, dist, cscore) in enumerate(top, 1):
-        tag = format_source_tag(doc.metadata)
-        if show_scores:
-            tag = f"{tag}\n  dist={dist:.4f}  score={cscore:.4f}"
-        if show_preview:
-            prev = short_preview(doc.page_content)
-            tag = f"{tag}\n> {prev}"
-        sources.append(f"[{i}] ({tag})")
+        # Fuentes (built and displayed inside the same chat message)
+        sources = []
+        for i, (doc, dist, cscore) in enumerate(top, 1):
+            tag = format_source_tag(doc.metadata)
+            if show_scores:
+                tag = f"{tag}\n  dist={dist:.4f}  score={cscore:.4f}"
+            if show_preview:
+                prev = short_preview(doc.page_content)
+                tag = f"{tag}\n> {prev}"
+            sources.append(f"[{i}] ({tag})")
 
-    # Respuesta
-    with st.chat_message("assistant"):
-        # Confidence indicator
-        if not confidence["confident"]:
-            if confidence["reason"] == "no_results":
-                st.warning("⚠️ No se encontraron fragmentos relevantes. La respuesta puede ser limitada.")
-            elif confidence["reason"] == "low_relevance":
-                st.info(f"ℹ️ Contexto parcial ({confidence['good_count']} fragmentos relevantes, "
-                        f"similitud promedio: {confidence['avg_sim']:.2f}). "
-                        "Considerá reformular o dar más detalles.")
-        if render_plain:
-            st.text(normalize_plain(answer))
-        else:
-            st.markdown(escape_markdown(answer))
         if show_sources and sources:
-            with st.expander("Fuentes"):
+            with st.expander("📚 Fuentes"):
                 for s in sources:
                     st.write(s)
 
