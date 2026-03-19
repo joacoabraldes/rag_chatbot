@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''rag_utils.py''\\).read\\(\\)\\); print\\(''rag_utils.py OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''server.py''\\).read\\(\\)\\); print\\(''server.py OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''app_streamlit.py''\\).read\\(\\)\\); print\\(''app_streamlit.py OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''rag_utils.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''rag_utils.py OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''server.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''server.py OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''app_streamlit.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''app_streamlit.py OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''app_streamlit.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''c:/Users/Joaco/Desktop/rag_chatbot/app_streamlit.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(find /c/Users/Joaco/Desktop/rag_chatbot -type f -name *.css -o -name *.html -o -name *.toml -o -name *.env)",
+      "Bash(wc:*)",
+      "Bash(grep -r \"font\\\\|color\\\\|background\\\\|padding\\\\|margin\\\\|border\" /c/Users/Joaco/Desktop/rag_chatbot/*.py)"
+    ]
+  }
+}

@@ -4,10 +4,11 @@ Shared utilities for the RAG chatbot.
 Centralises functions used by query.py, app_streamlit.py and server.py.
 """
 
-import os, json, datetime, math, re, unicodedata
-from typing import List, Dict, Tuple, Any, Optional
+import os, sys, json, datetime, math, re, unicodedata, hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict, Any, Optional
 
-from openai import OpenAI
+from openai import OpenAI, APITimeoutError, APIConnectionError
 
 # ─── Date helpers ────────────────────────────────────────────────────────────
 
@@ -296,7 +297,7 @@ def contextualize_query(
     )
 
     try:
-        client = OpenAI()
+        client = OpenAI(timeout=15.0)
         resp = client.chat.completions.create(
             model=openai_model,
             messages=[
@@ -308,6 +309,8 @@ def contextualize_query(
         )
         rewritten = resp.choices[0].message.content.strip()
         return rewritten if rewritten else user_input
+    except (APITimeoutError, APIConnectionError):
+        return user_input
     except Exception:
         return user_input
 
@@ -337,7 +340,7 @@ def expand_queries_llm(
     Falls back to the original query on any error.
     """
     try:
-        client = OpenAI()
+        client = OpenAI(timeout=20.0)
         resp = client.chat.completions.create(
             model=openai_model,
             messages=[
@@ -352,6 +355,8 @@ def expand_queries_llm(
         expansions = json.loads(raw)
         if isinstance(expansions, list):
             return [query] + [e for e in expansions if isinstance(e, str) and e.strip()]
+    except (APITimeoutError, APIConnectionError):
+        pass
     except Exception:
         pass
     # Fallback: just the original query
@@ -385,10 +390,13 @@ def expand_queries_simple(q: str) -> List[str]:
 
 # ─── History ─────────────────────────────────────────────────────────────────
 
-def save_history(path: str, record: dict):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+def save_history(path: str, record: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
 
 
 # ─── Context building ───────────────────────────────────────────────────────
@@ -422,6 +430,187 @@ def now_iso() -> str:
 KEYWORDS_BOOST = ["mep", "ccl", "mulc", "tipo de cambio", "dólar", "cotización", "oficial"]
 
 
-def boost_keywords(text: str) -> float:
+def boost_keywords(text: str, keywords: Optional[List[str]] = None) -> float:
+    kws = keywords if keywords is not None else KEYWORDS_BOOST
     tl = text.lower()
-    return 0.10 * sum(kw in tl for kw in KEYWORDS_BOOST)
+    return 0.10 * sum(kw in tl for kw in kws)
+
+
+# ─── Parallel retrieval ──────────────────────────────────────────────────────
+
+def retrieve_from_collections_parallel(
+    vectordbs: Dict[str, Any],
+    queries: List[str],
+    fetch_k_each: List[int],
+    max_workers: int = 4,
+) -> list:
+    """Query all (collection, query) pairs concurrently and merge results.
+
+    ChromaDB PersistentClient is read-safe across threads, so no locking needed.
+    Returns a flat list of (doc, dist) tuples ready for deduplication.
+    """
+    futures_map = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for (col, vdb), k_each in zip(vectordbs.items(), fetch_k_each):
+            if k_each <= 0:
+                continue
+            for qexp in queries:
+                future = executor.submit(
+                    vdb.similarity_search_with_score, qexp, k_each
+                )
+                futures_map[future] = col
+
+        candidates: list = []
+        try:
+            for future in as_completed(futures_map, timeout=30):
+                col = futures_map[future]
+                try:
+                    results = future.result(timeout=30)
+                    for doc, dist in results:
+                        md = dict(doc.metadata or {})
+                        md["_collection"] = col
+                        doc.metadata = md
+                        candidates.append((doc, dist))
+                except TimeoutError:
+                    print(f"[RAG] Collection '{col}' timed out", file=sys.stderr)
+                except Exception as e:
+                    print(f"[RAG] Collection '{col}' retrieval error: {e}", file=sys.stderr)
+        except TimeoutError:
+            print("[RAG] retrieve_from_collections_parallel overall timeout", file=sys.stderr)
+
+    return candidates
+
+
+# ─── Retrieval result cache ──────────────────────────────────────────────────
+
+_retrieval_cache: Dict[str, Any] = {}
+RETRIEVAL_CACHE_TTL = 300   # seconds
+RETRIEVAL_CACHE_MAX_SIZE = 100
+
+
+def make_cache_key(query: str, cols: List[str], k: int, recency_weight: float) -> str:
+    payload = f"{query}|{sorted(cols)}|{k}|{recency_weight:.2f}"
+    return hashlib.md5(payload.encode()).hexdigest()
+
+
+def get_cached_results(key: str) -> Optional[list]:
+    entry = _retrieval_cache.get(key)
+    if entry is None:
+        return None
+    ts, results = entry
+    if (datetime.datetime.now().timestamp() - ts) > RETRIEVAL_CACHE_TTL:
+        del _retrieval_cache[key]
+        return None
+    return results
+
+
+def set_cached_results(key: str, results: list) -> None:
+    if len(_retrieval_cache) >= RETRIEVAL_CACHE_MAX_SIZE:
+        oldest_key = min(_retrieval_cache, key=lambda k: _retrieval_cache[k][0])
+        del _retrieval_cache[oldest_key]
+    _retrieval_cache[key] = (datetime.datetime.now().timestamp(), results)
+
+
+def clear_retrieval_cache() -> None:
+    _retrieval_cache.clear()
+
+
+# ─── Token budget helpers ────────────────────────────────────────────────────
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~1 token per 4 characters for mixed Spanish/English."""
+    return max(1, len(text) // 4)
+
+
+def trim_history_to_budget(history: list, token_budget: int = 2000) -> list:
+    """Return the most recent history messages that fit within token_budget."""
+    total = 0
+    result = []
+    for msg in reversed(history):
+        tokens = estimate_tokens(msg.get("content", ""))
+        if total + tokens > token_budget:
+            break
+        result.insert(0, msg)
+        total += tokens
+    return result
+
+
+# ─── Inline citation rendering ───────────────────────────────────────────────
+
+def generate_suggested_questions(
+    vectordbs: Dict[str, Any],
+    n: int = 5,
+    openai_model: str = "gpt-4o-mini",
+) -> List[str]:
+    """Sample corpus metadata and use LLM to generate contextually relevant questions.
+
+    Falls back to generic prompts on any error so the UI always has something to show.
+    """
+    _FALLBACK = [
+        "Cuales son las ultimas decisiones de tasas del banco central?",
+        "Resumime las condiciones macroeconomicas actuales.",
+        "Cual es la perspectiva de inflacion?",
+        "Factores de riesgo clave en los informes mas recientes?",
+        "Compara la politica monetaria de las principales economias.",
+    ]
+    try:
+        snippets = []
+        for col, vdb in list(vectordbs.items())[:3]:
+            try:
+                result = vdb.get(limit=8, include=["metadatas", "documents"])
+                for doc_text, meta in zip(
+                    result.get("documents") or [],
+                    result.get("metadatas") or [],
+                ):
+                    name = best_source_name(meta or {})
+                    date = (meta or {}).get("date_iso", "")
+                    preview = short_preview(doc_text or "", 120)
+                    snippets.append(f"[{col}] {name} {date}: {preview}")
+                    if len(snippets) >= 12:
+                        break
+            except Exception:
+                continue
+            if len(snippets) >= 12:
+                break
+
+        if not snippets:
+            return _FALLBACK
+
+        corpus_summary = "\n".join(snippets[:12])
+        prompt = (
+            f"Based on these document excerpts from an economics/finance knowledge base:\n\n"
+            f"{corpus_summary}\n\n"
+            f"Generate exactly {n} concise, specific questions a finance or economics analyst "
+            f"would want to ask. Return ONLY a JSON array of {n} strings."
+        )
+        client = OpenAI(timeout=20.0)
+        resp = client.chat.completions.create(
+            model=openai_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5,
+            max_tokens=300,
+        )
+        raw = resp.choices[0].message.content.strip()
+        questions = json.loads(raw)
+        if isinstance(questions, list) and len(questions) >= n:
+            return [str(q) for q in questions[:n]]
+    except Exception:
+        pass
+    return _FALLBACK
+
+
+def render_with_citations(answer: str, sources: list) -> str:
+    """Replace [N] citation markers with HTML superscripts with source tooltips.
+
+    Sources is a list of markdown strings produced by the source card builder.
+    Out-of-range markers are left as plain text.
+    """
+    def _replace(match: re.Match) -> str:
+        n = int(match.group(1))
+        if 1 <= n <= len(sources):
+            # Extract first line of source card for tooltip (strip markdown)
+            tip = re.sub(r"[*`>\[\]]", "", sources[n - 1].split("\n")[0]).strip()
+            return f'<sup title="{tip}">[{n}]</sup>'
+        return match.group(0)
+
+    return re.sub(r"\[(\d+)\]", _replace, answer)
