@@ -82,6 +82,58 @@ def try_parse_date_from_string(s: str) -> Optional[str]:
     return None
 
 
+def extract_date_range_from_query(query: str) -> Optional[dict]:
+    """Extract date range filters from natural language query.
+
+    Returns a dict like {"$gte": "2026-02-01", "$lte": "2026-02-28"} or None.
+    """
+    import calendar
+    today = datetime.date.today()
+    lower = query.lower()
+
+    # "last month" / "el mes pasado" / "mes anterior"
+    if any(p in lower for p in ["mes pasado", "mes anterior", "last month", "último mes", "ultimo mes"]):
+        first = (today.replace(day=1) - datetime.timedelta(days=1)).replace(day=1)
+        last_day = calendar.monthrange(first.year, first.month)[1]
+        last = first.replace(day=last_day)
+        return {"$gte": first.isoformat(), "$lte": last.isoformat()}
+
+    # "last week" / "semana pasada" / "última semana"
+    if any(p in lower for p in ["semana pasada", "última semana", "ultima semana", "last week"]):
+        end = today - datetime.timedelta(days=today.weekday() + 1)
+        start = end - datetime.timedelta(days=6)
+        return {"$gte": start.isoformat(), "$lte": end.isoformat()}
+
+    # "past N days" / "últimos N días"
+    m = re.search(r'(?:últimos?|ultimos?|past|last)\s+(\d+)\s+(?:días|dias|days)', lower)
+    if m:
+        n = int(m.group(1))
+        start = today - datetime.timedelta(days=n)
+        return {"$gte": start.isoformat(), "$lte": today.isoformat()}
+
+    # Specific month + year: "marzo 2026", "march 2026", "febrero 2026"
+    for mes_name, mes_num in MESES.items():
+        pattern = rf'{mes_name}\s+(?:de\s+)?(\d{{4}})'
+        m_hit = re.search(pattern, lower)
+        if m_hit:
+            year = int(m_hit.group(1))
+            last_day = calendar.monthrange(year, mes_num)[1]
+            return {"$gte": f"{year:04d}-{mes_num:02d}-01", "$lte": f"{year:04d}-{mes_num:02d}-{last_day:02d}"}
+
+    # English month names
+    en_months = {"january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+                 "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12}
+    for name, num in en_months.items():
+        pattern = rf'{name}\s+(\d{{4}})'
+        m_hit = re.search(pattern, lower)
+        if m_hit:
+            year = int(m_hit.group(1))
+            last_day = calendar.monthrange(year, num)[1]
+            return {"$gte": f"{year:04d}-{num:02d}-01", "$lte": f"{year:04d}-{num:02d}-{last_day:02d}"}
+
+    return None
+
+
 def infer_date_iso(meta: Dict[str, Any], date_field: Optional[str]) -> Optional[str]:
     """Infer an ISO date from metadata fields or filename patterns."""
     if date_field and isinstance(meta.get(date_field), str):

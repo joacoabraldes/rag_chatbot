@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """FastAPI route handlers."""
 
-import os, json, logging, datetime, pathlib
+import os, json, logging, datetime, pathlib, re
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, HTTPException
@@ -16,7 +16,7 @@ from .models import AskRequest
 from core.prompt import (
     load_prompt, assess_confidence, build_confidence_note, best_source_name, best_page,
 )
-from core.dates import parse_date_iso
+from core.dates import parse_date_iso, extract_date_range_from_query
 from core.scoring import combined_score, boost_keywords
 from core.retrieval import (
     retrieve_from_collections_parallel, deduplicate_candidates,
@@ -27,6 +27,7 @@ from core.llm import (
     contextualize_query, expand_queries_llm, expand_queries_simple,
     generate_followup_questions, generate_suggested_questions,
 )
+from core.text import postprocess_response
 
 DB_DIR = os.environ.get("CHROMA_DB_DIR", "./chroma_db")
 DOCS_DIR = os.environ.get("DOCS_DIR", "./docs")
@@ -99,6 +100,8 @@ def _retrieve_and_prepare(req: AskRequest):
         for col in cols
     }
 
+    date_filter = extract_date_range_from_query(req.query)
+
     ks = split_k_across(len(cols), req.k)
     fetch_k_each = [max(5, int(k * 2.0)) for k in ks]
 
@@ -107,7 +110,9 @@ def _retrieve_and_prepare(req: AskRequest):
     if cached is not None:
         candidates_all = cached
     else:
-        candidates_all = retrieve_from_collections_parallel(vectordbs, queries, fetch_k_each)
+        candidates_all = retrieve_from_collections_parallel(
+            vectordbs, queries, fetch_k_each, date_filter=date_filter,
+        )
         set_cached_results(cache_key, candidates_all)
 
     candidates_all = deduplicate_candidates(candidates_all)
@@ -153,7 +158,7 @@ async def ask_stream(req: AskRequest) -> StreamingResponse:
         logging.exception("Error in /ask/stream endpoint")
         raise HTTPException(
             status_code=500,
-            detail="Ocurrio un error inesperado al procesar la consulta. Por favor, intenta de nuevo.",
+            detail="Ocurrió un error inesperado al procesar la consulta. Por favor, intentá de nuevo.",
         )
 
     async def event_generator():
@@ -170,20 +175,33 @@ async def ask_stream(req: AskRequest) -> StreamingResponse:
                     if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                         text = chunk.choices[0].delta.content
                         full_answer.append(text)
-                        yield f"data: {text}\n\n"
+                        # SSE spec: multi-line data must have each line
+                        # prefixed with "data: ", otherwise the client
+                        # parser drops lines that lack the prefix.
+                        for line in text.split("\n"):
+                            yield f"data: {line}\n"
+                        yield "\n"
                 except Exception:
                     continue
         except (APITimeoutError, APIConnectionError):
             logging.exception("AI service timeout/connection error in stream")
-            yield "data: [ERROR] El servicio de IA tardo demasiado o no se pudo conectar. Intenta de nuevo.\n\n"
+            yield "data: [ERROR] El servicio de IA tardó demasiado o no se pudo conectar. Intentá de nuevo.\n\n"
         except Exception:
             logging.exception("Unexpected error in stream")
-            yield "data: [ERROR] Ocurrio un error inesperado al generar la respuesta.\n\n"
+            yield "data: [ERROR] Ocurrió un error inesperado al generar la respuesta.\n\n"
 
         yield "data: [DONE]\n\n"
 
+        answer_text = postprocess_response("".join(full_answer))
+
+        # Parse cited source indices from the answer
+        cited_indices = set(int(m) for m in re.findall(r'\[(\d+)\]', answer_text))
+
+        # Build sources list — only include cited sources
         sources_list = []
         for i, (doc, dist, cscore) in enumerate(top, 1):
+            if cited_indices and i not in cited_indices:
+                continue
             md = doc.metadata
             sources_list.append({
                 "index": i,
@@ -195,9 +213,6 @@ async def ask_stream(req: AskRequest) -> StreamingResponse:
                 "text": doc.page_content[:500],
             })
         yield f"data: [SOURCES] {json.dumps(sources_list, ensure_ascii=False)}\n\n"
-        yield f"data: [CONFIDENCE] {json.dumps(confidence, ensure_ascii=False)}\n\n"
-
-        answer_text = "".join(full_answer)
         try:
             followups = generate_followup_questions(req.query, answer_text, openai_model=req.openai_model)
         except Exception:

@@ -15,17 +15,25 @@ def retrieve_from_collections_parallel(
     queries: List[str],
     fetch_k_each: List[int],
     max_workers: int = 4,
+    date_filter: Optional[dict] = None,
 ) -> list:
     """Query all (collection, query) pairs concurrently and merge results."""
+    chroma_filter = {"date_iso": date_filter} if date_filter else None
     futures_map = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         for (col, vdb), k_each in zip(vectordbs.items(), fetch_k_each):
             if k_each <= 0:
                 continue
             for qexp in queries:
-                future = executor.submit(
-                    vdb.similarity_search_with_score, qexp, k_each
-                )
+                if chroma_filter:
+                    future = executor.submit(
+                        vdb.similarity_search_with_score, qexp, k_each,
+                        filter=chroma_filter,
+                    )
+                else:
+                    future = executor.submit(
+                        vdb.similarity_search_with_score, qexp, k_each,
+                    )
                 futures_map[future] = col
 
         candidates: list = []

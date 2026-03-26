@@ -145,11 +145,11 @@ def generate_suggested_questions(
 ) -> List[str]:
     """Sample corpus metadata and use LLM to generate contextually relevant questions."""
     _FALLBACK = [
-        "Cuales son las ultimas decisiones de tasas del banco central?",
-        "Resumime las condiciones macroeconomicas actuales.",
-        "Cual es la perspectiva de inflacion?",
-        "Factores de riesgo clave en los informes mas recientes?",
-        "Compara la politica monetaria de las principales economias.",
+        "¿Cuáles son las últimas decisiones de tasas del banco central?",
+        "Resumime las condiciones macroeconómicas actuales.",
+        "¿Cuál es la perspectiva de inflación?",
+        "Factores de riesgo clave en los informes más recientes.",
+        "Compará la política monetaria de las principales economías.",
     ]
     try:
         snippets = []
@@ -198,11 +198,11 @@ def generate_suggested_questions(
 
 _FOLLOWUP_SYSTEM = (
     "Eres un asistente que genera preguntas de seguimiento. "
-    "Dado una pregunta del usuario y la respuesta del asistente, "
-    "genera exactamente 3 preguntas cortas y relevantes que el usuario "
-    "podria querer hacer a continuacion. Las preguntas deben ser especificas "
-    "y basadas en la respuesta dada. Devuelve SOLO un array JSON de 3 strings. "
-    "Las preguntas deben estar en espanol."
+    "Dada una pregunta del usuario y la respuesta del asistente, "
+    "generá exactamente 3 preguntas cortas y relevantes que el usuario "
+    "podría querer hacer a continuación. Las preguntas deben ser específicas "
+    "y basadas en la respuesta dada. Devolvé SOLO un array JSON de 3 strings. "
+    "Las preguntas deben estar en español y usar puntuación correcta."
 )
 
 

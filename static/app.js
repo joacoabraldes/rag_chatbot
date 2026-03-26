@@ -131,7 +131,7 @@ async function loadSuggestedQuestions() {
         skel.className = 'skeleton-line';
         skel.style.width = `${140 + Math.random() * 100}px`;
         skel.style.height = '38px';
-        skel.style.borderRadius = '24px';
+        skel.style.borderRadius = '100px';
         container.appendChild(skel);
     }
 
@@ -152,30 +152,6 @@ async function loadSuggestedQuestions() {
         container.innerHTML = '';
         console.error('Failed to load suggested questions:', e);
     }
-}
-
-// ─── Confidence Badge ──────────────────────────────────────────────
-function renderConfidenceBadge(confidence) {
-    if (!confidence || confidence.reason === undefined) return '';
-    let cls, icon, label;
-    if (confidence.confident && (confidence.avg_sim || 0) >= 0.6) {
-        cls = 'confidence-high';
-        icon = '\u25cf';
-        label = 'Alta confianza en las fuentes';
-    } else if (confidence.confident) {
-        cls = 'confidence-mid';
-        icon = '\u25d0';
-        label = 'Confianza moderada en las fuentes';
-    } else if (confidence.reason === 'no_results') {
-        cls = 'confidence-low';
-        icon = '\u25cb';
-        label = 'No se encontraron fuentes relevantes';
-    } else {
-        cls = 'confidence-low';
-        icon = '\u25cb';
-        label = 'Pocas fuentes relevantes';
-    }
-    return `<div class="confidence-badge ${cls}"><span>${icon}</span><span>${label}</span></div>`;
 }
 
 // ─── Render Messages ───────────────────────────────────────────────
@@ -220,45 +196,34 @@ function renderSourceBadges(bubble, sources) {
     const toggle = document.getElementById('toggle-sources');
     if (!toggle || !toggle.checked) return;
     if (!sources || sources.length === 0) return;
+
     const container = document.createElement('div');
-    container.className = 'sources-row';
+    container.className = 'sources-list';
 
-    let panel = null;
-    let activeIdx = null;
+    sources.forEach((src, i) => {
+        const ref = document.createElement('div');
+        ref.className = 'source-ref';
 
-    for (const src of sources) {
-        const badge = document.createElement('button');
-        badge.className = 'source-badge';
-        badge.type = 'button';
+        const idxSpan = document.createElement('span');
+        idxSpan.className = 'source-ref-idx';
+        idxSpan.textContent = `[${src.index || (i + 1)}]`;
 
-        const dateStr = src.date_iso ? ` ${src.date_iso}` : '';
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'source-ref-name';
+        nameSpan.textContent = src.filename || 'desconocido';
 
-        badge.innerHTML = `
-            <span class="badge-name">${escapeHtml(src.filename || 'desconocido')}</span>
-            <span class="badge-meta">${escapeHtml(dateStr)}</span>`;
+        ref.appendChild(idxSpan);
+        ref.appendChild(nameSpan);
 
-        const idx = src.index;
-        badge.addEventListener('click', () => {
-            if (activeIdx === idx) {
-                if (panel) { panel.remove(); panel = null; }
-                badge.classList.remove('active');
-                activeIdx = null;
-            } else {
-                container.querySelectorAll('.source-badge').forEach(b => b.classList.remove('active'));
-                badge.classList.add('active');
-                if (!panel) {
-                    panel = document.createElement('div');
-                    panel.className = 'source-panel';
-                    bubble.appendChild(panel);
-                }
-                panel.textContent = src.text || '(sin contenido)';
-                activeIdx = idx;
-                scrollToBottom();
-            }
-        });
+        if (src.date_iso) {
+            const dateSpan = document.createElement('span');
+            dateSpan.className = 'source-ref-date';
+            dateSpan.textContent = src.date_iso;
+            ref.appendChild(dateSpan);
+        }
 
-        container.appendChild(badge);
-    }
+        container.appendChild(ref);
+    });
 
     bubble.appendChild(container);
 }
@@ -337,7 +302,6 @@ async function sendMessage(query) {
         const decoder = new TextDecoder();
         let fullAnswer = '';
         let sources = [];
-        let confidence = {};
         let followups = [];
         let buffer = '';
         let done = false;
@@ -379,6 +343,10 @@ async function sendMessage(query) {
             buffer = lines.pop() || '';
 
             for (const line of lines) {
+                // SSE: lines starting with "data: " carry payload.
+                // Consecutive data lines before a blank line form one
+                // logical event — rejoin them with newlines so multi-line
+                // LLM chunks arrive intact.
                 if (!line.startsWith('data: ')) continue;
                 const payload = line.slice(6);
 
@@ -399,18 +367,6 @@ async function sendMessage(query) {
                     try { sources = JSON.parse(payload.slice(10)); } catch(e) {}
                     renderSourceBadges(bubble, sources);
                     scrollToBottom();
-                    continue;
-                }
-                if (payload.startsWith('[CONFIDENCE] ')) {
-                    try { confidence = JSON.parse(payload.slice(13)); } catch(e) {}
-                    // Insert confidence badge before message content
-                    const badgeHtml = renderConfidenceBadge(confidence);
-                    if (badgeHtml) {
-                        const existing = bubble.querySelector('.confidence-badge');
-                        if (!existing) {
-                            content.insertAdjacentHTML('beforebegin', badgeHtml);
-                        }
-                    }
                     continue;
                 }
                 if (payload.startsWith('[FOLLOWUPS] ')) {
@@ -435,7 +391,6 @@ async function sendMessage(query) {
             role: 'assistant',
             content: fullAnswer,
             sources,
-            confidence,
             followups,
         });
 
@@ -444,7 +399,7 @@ async function sendMessage(query) {
     } catch (e) {
         typingEl.remove();
         const { msgDiv, bubble, content } = createAssistantBubble();
-        content.textContent = 'Ocurrio un error al procesar la consulta. Por favor, intenta de nuevo.';
+        content.textContent = 'Ocurrió un error al procesar la consulta. Por favor, intentá de nuevo.';
         state.messages.push({ role: 'assistant', content: content.textContent });
         console.error('Stream error:', e);
     }
@@ -499,9 +454,9 @@ document.querySelectorAll('.theme-option').forEach(btn => {
     });
 });
 
-// Clear chat (with confirmation)
+// Clear chat
 function clearChat() {
-    if (state.messages.length > 0 && !confirm('Se borrara todo el historial de chat. Continuar?')) {
+    if (state.messages.length > 0 && !confirm('¿Se borrará todo el historial de chat. Continuar?')) {
         return;
     }
     state.messages = [];
