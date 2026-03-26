@@ -40,10 +40,10 @@ from langchain_experimental.text_splitter import SemanticChunker
 
 DEFAULT_PERSIST      = os.environ.get("CHROMA_DB_DIR", "./chroma_db")
 DEFAULT_EMBED        = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-m3")
-DEFAULT_OAI_MODEL    = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+DEFAULT_OAI_MODEL    = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
 PROMPT_PATH          = os.environ.get("PROMPT_TEMPLATE", "./prompt_template.txt")
 DEFAULT_HISTORY      = "./history/chat_history.jsonl"
-TEMPERATURE          = float(os.environ.get("TEMPERATURE", "0.0"))
+TEMPERATURE          = None  # GPT-5+ does not support temperature
 RECENCY_WEIGHT       = float(os.environ.get("RECENCY_WEIGHT", "0.35"))
 RECENCY_HALF_LIFE    = int(os.environ.get("RECENCY_HALF_LIFE", "30"))
 FETCH_FACTOR         = float(os.environ.get("FETCH_FACTOR", "2.0"))
@@ -750,7 +750,6 @@ if user_input and selected_cols:
                 stream = client_oa.chat.completions.create(
                     model=DEFAULT_OAI_MODEL,
                     messages=messages,
-                    temperature=TEMPERATURE,
                     stream=True,
                 )
                 stream_placeholder = st.empty()

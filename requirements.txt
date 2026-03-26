@@ -1,6 +1,6 @@
 langchain>=0.2.16
 langchain-community>=0.2.16
-chromadb>=0.5.5
+chromadb>=0.5.5,<1.0.0
 sentence-transformers>=3.0.1
 fastapi>=0.115.0
 uvicorn>=0.30.0
@@ -10,7 +10,5 @@ tiktoken>=0.7.0
 python-dotenv>=1.0.1
 langchain-chroma>=0.1.0
 langchain-huggingface>=0.1.0
-streamlit>=1.38.0
-langdetect>=1.0.9
 langchain-experimental>=0.0.61
 pypdf>=4.0.0

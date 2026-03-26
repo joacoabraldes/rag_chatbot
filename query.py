@@ -1,18 +1,22 @@
 # -*- coding: utf-8 -*-
+"""CLI query tool for RAG Analyst."""
+
 import os, datetime, argparse
-from typing import List, Dict, Tuple, Any, Optional
+
 import chromadb
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from openai import OpenAI
 
-from rag_utils import (
-    load_prompt, recency_score, sim_from_distance, combined_score,
-    parse_date_iso, expand_queries_simple, expand_queries_llm,
-    short_preview,
+from core.prompt import load_prompt, format_source_tag, best_source_name
+from core.dates import parse_date_iso
+from core.scoring import combined_score, boost_keywords
+from core.text import short_preview
+from core.retrieval import (
+    retrieve_from_collections_parallel, deduplicate_candidates, split_k_across,
 )
+from core.llm import expand_queries_simple, expand_queries_llm
 
-# ========= Main =========
 
 def main():
     p = argparse.ArgumentParser(description="Consulta RAG (CLI).")
@@ -21,8 +25,7 @@ def main():
     p.add_argument("--collections", nargs="+", help="Colecciones a usar")
     p.add_argument("--k", type=int, default=10, help="Cantidad total de documentos")
     p.add_argument("--embed-model", default="BAAI/bge-m3")
-    p.add_argument("--openai-model", default="gpt-4o-mini")
-    p.add_argument("--temperature", type=float, default=0.0)
+    p.add_argument("--openai-model", default="gpt-5-mini")
     p.add_argument("--recency-weight", type=float, default=0.35)
     p.add_argument("--half-life", type=int, default=30)
     p.add_argument("--min-date", default="")
@@ -49,17 +52,22 @@ def main():
     embedder = HuggingFaceEmbeddings(model_name=args.embed_model, encode_kwargs={"normalize_embeddings": True})
     vectordbs = {col: Chroma(client=client, collection_name=col, embedding_function=embedder) for col in cols}
 
-    # Recuperación
-    queries = [args.query]
+    # Query expansion
     if args.llm_expansion:
         queries = expand_queries_llm(args.query, openai_model=args.openai_model)
     elif args.use_query_expansion:
         queries = expand_queries_simple(args.query)
+    else:
+        queries = [args.query]
 
-    ks = [max(1, args.k // len(cols)) for _ in cols]
+    # Retrieval using shared parallel retrieval
+    ks = split_k_across(len(cols), args.k)
     fetch_k_each = [max(5, int(k * args.fetch_factor)) for k in ks]
-    results = []
-    today = datetime.date.today()
+
+    candidates_all = retrieve_from_collections_parallel(vectordbs, queries, fetch_k_each)
+    candidates_all = deduplicate_candidates(candidates_all)
+
+    # Date filter
     min_date = None
     if args.min_date:
         try:
@@ -68,41 +76,30 @@ def main():
         except Exception:
             pass
 
-    for (col, vdb), k_each in zip(vectordbs.items(), fetch_k_each):
-        candidates = []
-        for qexp in queries:
-            candidates += vdb.similarity_search_with_score(qexp, k=k_each)
-        seen = set()
-        uniq = []
-        for doc, dist in candidates:
-            key = (doc.page_content[:120], doc.metadata.get("rel_path"), doc.metadata.get("chunk_id"))
-            if key not in seen:
-                seen.add(key)
-                uniq.append((doc, dist))
-        for (doc, dist) in uniq:
-            md = dict(doc.metadata or {})
-            md["_collection"] = col
-            doc.metadata = md
-            d_iso = parse_date_iso(md)
-            if min_date and d_iso and d_iso < min_date:
-                continue
-            cscore = combined_score(dist, d_iso, today, args.recency_weight, args.half_life)
-            results.append((doc, dist, cscore))
+    # Scoring
+    today = datetime.date.today()
+    results = []
+    for doc, dist in candidates_all:
+        d_iso = parse_date_iso(doc.metadata)
+        if min_date and d_iso and d_iso < min_date:
+            continue
+        cscore = combined_score(dist, d_iso, today, args.recency_weight, args.half_life)
+        cscore += boost_keywords(doc.page_content)
+        results.append((doc, dist, cscore))
 
     results.sort(key=lambda x: x[2], reverse=True)
     top = results[:args.k]
 
     if not top:
-        print("⚠️ No se encontraron resultados.")
+        print("No se encontraron resultados.")
         return
 
-    # Contexto
+    # Context
     parts = []
     for i, (doc, dist, cscore) in enumerate(top, 1):
         md = doc.metadata
-        name = os.path.basename(md.get("rel_path") or md.get("source") or "desconocido")
-        d = md.get("date_iso", "?")
-        parts.append(f"[{i}] ({md.get('_collection')}) {name} (fecha: {d})\n{doc.page_content}")
+        tag = format_source_tag(md)
+        parts.append(f"[{i}] ({tag})\n{doc.page_content}")
     context = "\n\n".join(parts)
 
     system_prompt = load_prompt(args.prompt).format(context=context, question=args.query)
@@ -115,18 +112,18 @@ def main():
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": args.query},
         ],
-        temperature=args.temperature
     )
     answer = resp.choices[0].message.content
-    print("\n🧠 RESPUESTA:\n", answer, "\n")
+    print("\nRESPUESTA:\n", answer, "\n")
     print("=== Fuentes ===")
     for i, (doc, dist, cscore) in enumerate(top, 1):
         md = doc.metadata
-        name = os.path.basename(md.get("rel_path") or md.get("source") or "desconocido")
+        name = best_source_name(md)
         d = md.get("date_iso", "?")
         print(f"[{i}] ({md.get('_collection')}) {name}  dist={dist:.3f}  score={cscore:.3f}  fecha={d}")
         print(" ", short_preview(doc.page_content))
         print()
+
 
 if __name__ == "__main__":
     main()
