@@ -1,259 +1,208 @@
 # -*- coding: utf-8 -*-
-"""FastAPI route handlers."""
+"""FastAPI route handlers — chat endpoint with intent routing."""
 
-import os, json, logging, datetime, pathlib, re
-from concurrent.futures import ThreadPoolExecutor
+import json
+import logging
+import time
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
 
-import chromadb
-from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
-from openai import AsyncOpenAI, APITimeoutError, APIConnectionError
+from api.models import ChatRequest
+from core.config import TOP_K
+from core.llm import stream_chat
+from core.prompts import build_direct_system_prompt, build_rag_system_prompt
+from core.router import classify_intent
+from core.vectorstore import list_collections, query_chunks
 
-from .models import AskRequest
-from core.prompt import (
-    load_prompt, assess_confidence, build_confidence_note, best_source_name, best_page,
+log = logging.getLogger("rag")
+logging.basicConfig(
+    level=logging.INFO,
+    format="\033[90m%(asctime)s\033[0m %(message)s",
+    datefmt="%H:%M:%S",
 )
-from core.dates import parse_date_iso, extract_date_range_from_query
-from core.scoring import combined_score, boost_keywords
-from core.retrieval import (
-    retrieve_from_collections_parallel, deduplicate_candidates,
-    split_k_across, build_context,
-    make_cache_key, get_cached_results, set_cached_results,
-)
-from core.llm import (
-    contextualize_query, expand_queries_llm, expand_queries_simple,
-    generate_followup_questions, generate_suggested_questions,
-)
-from core.text import postprocess_response
-
-DB_DIR = os.environ.get("CHROMA_DB_DIR", "./chroma_db")
-DOCS_DIR = os.environ.get("DOCS_DIR", "./docs")
-PROMPT_PATH = os.environ.get("PROMPT_TEMPLATE", "./prompt_template.txt")
-DEFAULT_EMBED = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-m3")
 
 router = APIRouter()
 
-# Module-level embedder cache
-_embedder_cache: dict = {}
 
-
-def _get_embedder(model_name: str) -> HuggingFaceEmbeddings:
-    if model_name not in _embedder_cache:
-        _embedder_cache[model_name] = HuggingFaceEmbeddings(
-            model_name=model_name,
-            encode_kwargs={"normalize_embeddings": True},
+def _build_context(chunks: list) -> tuple[str, list]:
+    """Build context string from retrieved chunks, sorted chronologically."""
+    sorted_chunks = sorted(
+        chunks,
+        key=lambda c: c["metadata"].get("pub_date", ""),
+    )
+    parts = []
+    for i, chunk in enumerate(sorted_chunks, 1):
+        md = chunk["metadata"]
+        header = (
+            f"[{i}] Fuente: {md.get('source_file', 'desconocido')} | "
+            f"Fecha: {md.get('pub_date', 'N/A')} | "
+            f"Página: {md.get('page_number', 'N/A')}"
         )
-    return _embedder_cache[model_name]
+        parts.append(f"{header}\n{chunk['text']}")
+    return "\n\n".join(parts), sorted_chunks
 
 
-def _retrieve_and_prepare(req: AskRequest):
-    """Shared retrieval, scoring, context building for the streaming endpoint."""
-    model_name = req.embed_model or DEFAULT_EMBED
-    hf = _get_embedder(model_name)
+@router.post("/chat")
+async def chat(req: ChatRequest) -> StreamingResponse:
+    """Streaming chat endpoint with intent-based routing."""
+    log.info("─" * 60)
+    log.info(
+        "\033[1m>>> QUERY:\033[0m %s | show_sources=%s",
+        req.query[:80],
+        req.show_sources,
+    )
 
-    client = chromadb.PersistentClient(path=DB_DIR)
-    all_cols = [c.name for c in client.list_collections()]
-    cols = req.collections or all_cols
-    if not cols:
-        raise HTTPException(status_code=400, detail="No hay colecciones disponibles.")
-
-    search_query = req.query
-    if req.history and req.use_llm_expansion:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            ctx_future = pool.submit(
-                contextualize_query, req.query, req.history,
-                openai_model=req.openai_model,
-            )
-            exp_future = pool.submit(
-                expand_queries_llm, req.query,
-                openai_model=req.openai_model,
-            )
-            try:
-                search_query = ctx_future.result(timeout=12)
-            except Exception:
-                search_query = req.query
-            try:
-                raw_expansions = exp_future.result(timeout=14)
-            except Exception:
-                raw_expansions = [req.query]
-        queries = [search_query] + [q for q in raw_expansions if q != req.query]
-    elif req.history:
-        search_query = contextualize_query(
-            req.query, req.history, openai_model=req.openai_model
-        )
-        if req.use_simple_expansion:
-            queries = expand_queries_simple(search_query)
-        else:
-            queries = [search_query]
-    elif req.use_llm_expansion:
-        queries = expand_queries_llm(search_query, openai_model=req.openai_model)
-    elif req.use_simple_expansion:
-        queries = expand_queries_simple(search_query)
-    else:
-        queries = [search_query]
-
-    vectordbs = {
-        col: Chroma(client=client, collection_name=col, embedding_function=hf)
-        for col in cols
-    }
-
-    date_filter = extract_date_range_from_query(req.query)
-
-    ks = split_k_across(len(cols), req.k)
-    fetch_k_each = [max(5, int(k * 2.0)) for k in ks]
-
-    cache_key = make_cache_key(search_query, cols, req.k, req.recency_weight)
-    cached = get_cached_results(cache_key)
-    if cached is not None:
-        candidates_all = cached
-    else:
-        candidates_all = retrieve_from_collections_parallel(
-            vectordbs, queries, fetch_k_each, date_filter=date_filter,
-        )
-        set_cached_results(cache_key, candidates_all)
-
-    candidates_all = deduplicate_candidates(candidates_all)
-
-    today = datetime.date.today()
-    scored = []
-    for doc, dist in candidates_all:
-        d_iso = parse_date_iso(doc.metadata)
-        cscore = combined_score(dist, d_iso, today, req.recency_weight, req.half_life_days)
-        cscore += boost_keywords(doc.page_content)
-        scored.append((doc, dist, cscore))
-    scored.sort(key=lambda x: x[2], reverse=True)
-    top = scored[: req.k]
-
-    context = build_context(top)
-    confidence = assess_confidence(top)
-    confidence_note = build_confidence_note(confidence)
+    # Step 1: classify intent
+    t0 = time.perf_counter()
     try:
-        system_prompt = load_prompt(PROMPT_PATH).format(
-            context=context, question=req.query
-        ) + confidence_note
+        needs_retrieval = classify_intent(req.query)
     except Exception:
-        system_prompt = f"Context:\n{context}\n\nQuestion: {req.query}" + confidence_note
+        logging.exception("Intent classification failed, defaulting to RAG")
+        needs_retrieval = True
+    dt_classify = (time.perf_counter() - t0) * 1000
+
+    if needs_retrieval:
+        log.info(
+            "\033[33m[ROUTER]\033[0m retrieve=\033[1;32mTRUE\033[0m  (%.0fms)",
+            dt_classify,
+        )
+    else:
+        log.info(
+            "\033[33m[ROUTER]\033[0m retrieve=\033[1;31mFALSE\033[0m (%.0fms) → respuesta directa",
+            dt_classify,
+        )
+
+    # Step 2: build messages
+    sorted_chunks: list = []
+
+    if needs_retrieval:
+        t1 = time.perf_counter()
+        chunks = query_chunks(req.query, k=TOP_K)
+        dt_search = (time.perf_counter() - t1) * 1000
+
+        if chunks:
+            context, sorted_chunks = _build_context(chunks)
+            system_prompt = build_rag_system_prompt(context, req.show_sources)
+            log.info(
+                "\033[36m[CHROMA]\033[0m %d chunks recuperados (%.0fms)",
+                len(sorted_chunks),
+                dt_search,
+            )
+            for i, ch in enumerate(sorted_chunks, 1):
+                md = ch["metadata"]
+                log.info(
+                    "   [%d] %s | %s | p.%s | dist=%.3f | tags=%s",
+                    i,
+                    md.get("source_file", "?"),
+                    md.get("pub_date", "?"),
+                    md.get("page_number", "?"),
+                    ch.get("distance", -1),
+                    md.get("topic_tags", "")[:50],
+                )
+        else:
+            system_prompt = build_direct_system_prompt()
+            log.info(
+                "\033[36m[CHROMA]\033[0m \033[31m0 chunks\033[0m (%.0fms) → sin contexto",
+                dt_search,
+            )
+    else:
+        system_prompt = build_direct_system_prompt()
 
     messages = [{"role": "system", "content": system_prompt}]
+
     if req.history:
         for msg in req.history[-10:]:
             if msg.get("role") in ("user", "assistant"):
-                messages.append({"role": msg["role"], "content": msg["content"]})
+                messages.append(
+                    {"role": msg["role"], "content": msg["content"]}
+                )
+
     messages.append({"role": "user", "content": req.query})
 
-    return top, confidence, messages
+    log.info(
+        "\033[35m[LLM]\033[0m Enviando %d mensajes (system prompt: %d chars)",
+        len(messages),
+        len(system_prompt),
+    )
 
-
-@router.post("/ask/stream")
-async def ask_stream(req: AskRequest) -> StreamingResponse:
-    """Streaming endpoint — returns Server-Sent Events."""
-    try:
-        top, confidence, messages = _retrieve_and_prepare(req)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.exception("Error in /ask/stream endpoint")
-        raise HTTPException(
-            status_code=500,
-            detail="Ocurrió un error inesperado al procesar la consulta. Por favor, intentá de nuevo.",
-        )
-
+    # Step 3: stream response
     async def event_generator():
         full_answer = []
+        t2 = time.perf_counter()
         try:
-            async_client = AsyncOpenAI(timeout=60.0)
-            stream = await async_client.chat.completions.create(
-                model=req.openai_model,
-                messages=messages,
-                stream=True,
-            )
-            async for chunk in stream:
-                try:
-                    if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                        text = chunk.choices[0].delta.content
-                        full_answer.append(text)
-                        # SSE spec: multi-line data must have each line
-                        # prefixed with "data: ", otherwise the client
-                        # parser drops lines that lack the prefix.
-                        for line in text.split("\n"):
-                            yield f"data: {line}\n"
-                        yield "\n"
-                except Exception:
-                    continue
-        except (APITimeoutError, APIConnectionError):
-            logging.exception("AI service timeout/connection error in stream")
-            yield "data: [ERROR] El servicio de IA tardó demasiado o no se pudo conectar. Intentá de nuevo.\n\n"
+            async for text in stream_chat(messages):
+                full_answer.append(text)
+                for line in text.split("\n"):
+                    yield f"data: {line}\n"
+                yield "\n"
         except Exception:
-            logging.exception("Unexpected error in stream")
-            yield "data: [ERROR] Ocurrió un error inesperado al generar la respuesta.\n\n"
+            logging.exception("Error in LLM stream")
+            yield (
+                "data: [ERROR] Ocurrió un error al generar la respuesta.\n\n"
+            )
+
+        dt_llm = (time.perf_counter() - t2) * 1000
+        answer_text = "".join(full_answer)
+        log.info(
+            "\033[35m[LLM]\033[0m Respuesta: %d chars (%.0fms)",
+            len(answer_text),
+            dt_llm,
+        )
 
         yield "data: [DONE]\n\n"
 
-        answer_text = postprocess_response("".join(full_answer))
+        # Send routing metadata for debug badge
+        meta = {
+            "retrieve": needs_retrieval,
+            "chunks": len(sorted_chunks),
+            "sources_sent": bool(req.show_sources and needs_retrieval and sorted_chunks),
+        }
+        yield f"data: [META] {json.dumps(meta)}\n\n"
 
-        # Parse cited source indices from the answer
-        cited_indices = set(int(m) for m in re.findall(r'\[(\d+)\]', answer_text))
-
-        # Build sources list — only include cited sources
-        sources_list = []
-        for i, (doc, dist, cscore) in enumerate(top, 1):
-            if cited_indices and i not in cited_indices:
-                continue
-            md = doc.metadata
-            sources_list.append({
-                "index": i,
-                "filename": best_source_name(md),
-                "page": best_page(md),
-                "collection": md.get("_collection", ""),
-                "date_iso": md.get("date_iso", ""),
-                "rel_path": best_source_name(md),
-                "text": doc.page_content[:500],
-            })
-        yield f"data: [SOURCES] {json.dumps(sources_list, ensure_ascii=False)}\n\n"
-        try:
-            followups = generate_followup_questions(req.query, answer_text, openai_model=req.openai_model)
-        except Exception:
-            followups = []
-        yield f"data: [FOLLOWUPS] {json.dumps(followups, ensure_ascii=False)}\n\n"
+        # Send sources metadata if applicable
+        if req.show_sources and needs_retrieval and sorted_chunks:
+            sources = []
+            for i, chunk in enumerate(sorted_chunks, 1):
+                md = chunk["metadata"]
+                sources.append(
+                    {
+                        "index": i,
+                        "source_file": md.get("source_file", ""),
+                        "pub_date": md.get("pub_date", ""),
+                        "page_number": md.get("page_number", ""),
+                        "topic_tags": md.get("topic_tags", ""),
+                    }
+                )
+            log.info(
+                "\033[32m[SOURCES]\033[0m Enviando %d fuentes al frontend",
+                len(sources),
+            )
+            yield (
+                f"data: [SOURCES] "
+                f"{json.dumps(sources, ensure_ascii=False)}\n\n"
+            )
+        else:
+            reasons = []
+            if not req.show_sources:
+                reasons.append("show_sources=false")
+            if not needs_retrieval:
+                reasons.append("retrieve=false")
+            if needs_retrieval and not sorted_chunks:
+                reasons.append("0 chunks")
+            log.info(
+                "\033[32m[SOURCES]\033[0m No se envían fuentes (%s)",
+                ", ".join(reasons) if reasons else "?",
+            )
 
         yield "data: [END]\n\n"
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(), media_type="text/event-stream"
+    )
 
 
 @router.get("/collections")
-def list_collections():
-    client = chromadb.PersistentClient(path=DB_DIR)
-    return {"collections": [c.name for c in client.list_collections()]}
-
-
-@router.get("/suggested-questions")
-def get_suggested_questions():
-    try:
-        client = chromadb.PersistentClient(path=DB_DIR)
-        all_cols = [c.name for c in client.list_collections()]
-        if not all_cols:
-            return {"questions": []}
-        hf = _get_embedder(DEFAULT_EMBED)
-        vectordbs = {
-            col: Chroma(client=client, collection_name=col, embedding_function=hf)
-            for col in all_cols[:3]
-        }
-        questions = generate_suggested_questions(
-            vectordbs, openai_model=os.environ.get("OPENAI_MODEL", "gpt-5-mini")
-        )
-        return {"questions": questions}
-    except Exception:
-        return {"questions": []}
-
-
-@router.get("/docs/{filename}")
-async def serve_document(filename: str):
-    safe = pathlib.Path(filename).name
-    path = pathlib.Path(DOCS_DIR) / safe
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Documento no encontrado")
-    return FileResponse(str(path), filename=safe)
+def get_collections():
+    """List available ChromaDB collections."""
+    return {"collections": list_collections()}

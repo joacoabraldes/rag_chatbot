@@ -2,16 +2,17 @@
 """FastAPI entry point — mounts API routes and serves static files."""
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from api.routes import router
 
-app = FastAPI(title="RAG Analyst API")
+app = FastAPI(title="RAG Chatbot API")
 
 app.add_middleware(
     CORSMiddleware,

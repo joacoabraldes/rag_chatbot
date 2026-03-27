@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>RAG Analyst</title>
+    <title>RAG Chatbot</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -41,27 +41,24 @@
     </div>
 
     <div class="settings-section">
-        <h4>Fuentes de documentos</h4>
-        <div id="collection-list"></div>
-        <label class="toggle-switch" style="margin-top:12px">
+        <h4>Respuestas</h4>
+        <label class="toggle-switch">
             <input type="checkbox" id="toggle-sources" checked>
             <span class="toggle-slider"></span>
             <span class="toggle-label">Mostrar fuentes en respuestas</span>
         </label>
     </div>
+
     <div class="settings-section">
         <h4>Acciones</h4>
         <button class="settings-btn danger" id="btn-clear-chat">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
             Limpiar chat
         </button>
-        <button class="settings-btn" id="btn-export-chat">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Exportar chat
-        </button>
     </div>
+
     <div class="settings-footer">
-        RAG Analyst &middot; Inteligencia documental<br>
+        RAG Chatbot &middot; Asistente económico<br>
         Potenciado por IA
     </div>
 </div>
@@ -80,7 +77,7 @@
                     <circle cx="20" cy="6" r="1.5" fill="white" stroke="none"/>
                 </svg>
             </span>
-            <span class="header-logo">RAG Analyst</span>
+            <span class="header-logo">RAG Chatbot</span>
         </div>
         <div class="header-right">
             <button class="icon-btn" id="btn-settings" title="Configuración">
@@ -98,17 +95,16 @@
                         <path d="M7 16l4-6 4 4 5-8" stroke="white" stroke-width="2" fill="none"/>
                     </svg>
                 </div>
-                <h2>Bienvenido a RAG Analyst</h2>
-                <p>Tu asistente de inteligencia para economía y finanzas.<br>
-                Preguntá lo que necesites sobre tus documentos.</p>
+                <h2>Bienvenido</h2>
+                <p>Tu asistente de inteligencia económica.<br>
+                Preguntá lo que necesites sobre los informes.</p>
             </div>
-            <div id="suggested-questions" class="suggested-pills"></div>
         </div>
     </main>
 
     <footer class="input-bar">
         <div class="input-container">
-            <textarea id="user-input" rows="1" placeholder="Hacé tu pregunta sobre los documentos..." autocomplete="off"></textarea>
+            <textarea id="user-input" rows="1" placeholder="Hacé tu pregunta..." autocomplete="off"></textarea>
             <button id="btn-send" class="send-btn" disabled title="Enviar">
                 <svg viewBox="0 0 24 24"><path d="M22 2 11 13"/><path d="M22 2 15 22 11 13 2 9z"/></svg>
             </button>
