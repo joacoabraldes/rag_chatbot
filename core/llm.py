@@ -8,11 +8,13 @@ from openai import AsyncOpenAI, OpenAI
 
 from core.config import OPENAI_MODEL, OPENAI_MODEL_FAST
 
+_async_client = AsyncOpenAI(timeout=60.0)
+_sync_client = OpenAI(timeout=30.0)
+
 
 async def stream_chat(messages: list, model: str | None = None) -> AsyncIterator[str]:
     """Yield text chunks from an OpenAI streaming response."""
-    client = AsyncOpenAI(timeout=60.0)
-    stream = await client.chat.completions.create(
+    stream = await _async_client.chat.completions.create(
         model=model or OPENAI_MODEL,
         messages=messages,
         stream=True,
@@ -34,7 +36,6 @@ def extract_topic_tags_batch(
 
     Returns a list of comma-separated tag strings, one per input chunk.
     """
-    client = OpenAI(timeout=30.0)
     llm_model = model or OPENAI_MODEL_FAST
     all_tags: List[str] = []
     batch_size = 10
@@ -55,7 +56,7 @@ def extract_topic_tags_batch(
             'Ejemplo: [["inflación", "precios"], ["tipo de cambio", "dólar"]]'
         )
         try:
-            resp = client.chat.completions.create(
+            resp = _sync_client.chat.completions.create(
                 model=llm_model,
                 messages=[{"role": "user", "content": prompt}],
                 max_completion_tokens=500,

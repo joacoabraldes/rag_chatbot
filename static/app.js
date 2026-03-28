@@ -277,7 +277,7 @@ async function sendMessage(query) {
                     continue;
                 }
 
-                fullAnswer += payload;
+                try { fullAnswer += JSON.parse(payload); } catch (e) { fullAnswer += payload; }
                 scheduleRender();
             }
         }

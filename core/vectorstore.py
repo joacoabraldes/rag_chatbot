@@ -46,7 +46,7 @@ def add_chunks(chunks: List[Dict], collection_name: str | None = None) -> None:
     batch_size = 5000
     for i in range(0, len(ids), batch_size):
         end = i + batch_size
-        collection.add(
+        collection.upsert(
             ids=ids[i:end],
             documents=documents[i:end],
             metadatas=metadatas[i:end],

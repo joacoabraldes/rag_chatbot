@@ -133,9 +133,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         try:
             async for text in stream_chat(messages):
                 full_answer.append(text)
-                for line in text.split("\n"):
-                    yield f"data: {line}\n"
-                yield "\n"
+                yield f"data: {json.dumps(text)}\n\n"
         except Exception:
             logging.exception("Error in LLM stream")
             yield (

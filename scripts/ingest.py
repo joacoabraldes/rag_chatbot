@@ -24,7 +24,7 @@ load_dotenv()
 import pdfplumber
 
 from core.chunking import semantic_chunk, split_into_sentences
-from core.config import OPENAI_MODEL, SIMILARITY_THRESHOLD
+from core.config import OPENAI_MODEL_FAST, SIMILARITY_THRESHOLD
 from core.llm import extract_topic_tags_batch
 from core.vectorstore import add_chunks, get_client
 
@@ -110,6 +110,7 @@ def process_pdf(
     chunk_groups = semantic_chunk(all_sentences, threshold)
 
     date_compact = pub_date.replace("-", "") if pub_date else "00000000"
+    file_slug = re.sub(r"[^a-zA-Z0-9]", "_", os.path.splitext(filename)[0])[:40]
     chunk_objects: list[dict] = []
     chunks_for_tags: list[str] = []
 
@@ -119,7 +120,7 @@ def process_pdf(
         page_num = sentence_pages[cursor] if cursor < len(sentence_pages) else 1
         cursor += len(group)
 
-        chunk_id = f"{date_compact}_p{page_num}_c{ci}"
+        chunk_id = f"{file_slug}_{date_compact}_p{page_num}_c{ci}"
         chunk_objects.append(
             {
                 "chunk_id": chunk_id,
@@ -197,7 +198,7 @@ def main():
     args = parser.parse_args()
 
     threshold = args.threshold or SIMILARITY_THRESHOLD
-    model = args.model or OPENAI_MODEL
+    model = args.model or OPENAI_MODEL_FAST
     pdf_dir = Path(args.pdf_dir)
 
     if not pdf_dir.exists():
