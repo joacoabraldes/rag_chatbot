@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """FastAPI route handlers — chat endpoint with intent routing."""
 
+import asyncio
 import json
 import logging
 import time
@@ -14,7 +15,7 @@ from core.llm import stream_chat
 from core.prompts import build_direct_system_prompt, build_rag_system_prompt
 from core.reranker import rerank
 from core.router import classify_intent
-from core.vectorstore import list_collections, query_chunks
+from core.vectorstore import list_collections, query_chunks_async
 
 log = logging.getLogger("rag")
 logging.basicConfig(
@@ -54,71 +55,74 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         req.show_sources,
     )
 
-    # Step 1: classify intent
+    # Step 1: classify intent + vector search in parallel
     t0 = time.perf_counter()
-    try:
-        needs_retrieval = classify_intent(req.query)
-    except Exception:
-        logging.exception("Intent classification failed, defaulting to RAG")
-        needs_retrieval = True
-    dt_classify = (time.perf_counter() - t0) * 1000
+
+    async def _classify():
+        try:
+            return await classify_intent(req.query)
+        except Exception:
+            logging.exception("Intent classification failed, defaulting to RAG")
+            return True
+
+    needs_retrieval, chunks = await asyncio.gather(
+        _classify(),
+        query_chunks_async(req.query, k=TOP_K),
+    )
+
+    dt_parallel = (time.perf_counter() - t0) * 1000
 
     if needs_retrieval:
         log.info(
-            "\033[33m[ROUTER]\033[0m retrieve=\033[1;32mTRUE\033[0m  (%.0fms)",
-            dt_classify,
+            "\033[33m[ROUTER]\033[0m retrieve=\033[1;32mTRUE\033[0m  (%.0fms, parallel)",
+            dt_parallel,
         )
     else:
         log.info(
             "\033[33m[ROUTER]\033[0m retrieve=\033[1;31mFALSE\033[0m (%.0fms) → respuesta directa",
-            dt_classify,
+            dt_parallel,
         )
 
     # Step 2: build messages
     sorted_chunks: list = []
 
-    if needs_retrieval:
-        t1 = time.perf_counter()
-        chunks = query_chunks(req.query, k=TOP_K)
-        dt_search = (time.perf_counter() - t1) * 1000
+    if needs_retrieval and chunks:
+        log.info(
+            "\033[36m[CHROMA]\033[0m %d chunks recuperados (%.0fms, parallel)",
+            len(chunks),
+            dt_parallel,
+        )
 
-        if chunks:
-            log.info(
-                "\033[36m[CHROMA]\033[0m %d chunks recuperados (%.0fms)",
-                len(chunks),
-                dt_search,
-            )
+        t_rerank = time.perf_counter()
+        chunks = rerank(req.query, chunks, top_n=RERANK_TOP_N)
+        dt_rerank = (time.perf_counter() - t_rerank) * 1000
+        log.info(
+            "\033[34m[RERANK]\033[0m %d → %d chunks (%.0fms)",
+            len(chunks) + (TOP_K - len(chunks)),
+            len(chunks),
+            dt_rerank,
+        )
 
-            t_rerank = time.perf_counter()
-            chunks = rerank(req.query, chunks, top_n=RERANK_TOP_N)
-            dt_rerank = (time.perf_counter() - t_rerank) * 1000
+        context, sorted_chunks = _build_context(chunks)
+        system_prompt = build_rag_system_prompt(context, req.show_sources)
+        for i, ch in enumerate(sorted_chunks, 1):
+            md = ch["metadata"]
             log.info(
-                "\033[34m[RERANK]\033[0m %d → %d chunks (%.0fms)",
-                len(chunks) + (TOP_K - len(chunks)),
-                len(chunks),
-                dt_rerank,
+                "   [%d] %s | %s | p.%s | dist=%.3f | rerank=%.3f | tags=%s",
+                i,
+                md.get("source_file", "?"),
+                md.get("pub_date", "?"),
+                md.get("page_number", "?"),
+                ch.get("distance", -1),
+                ch.get("rerank_score", -1),
+                md.get("topic_tags", "")[:50],
             )
-
-            context, sorted_chunks = _build_context(chunks)
-            system_prompt = build_rag_system_prompt(context, req.show_sources)
-            for i, ch in enumerate(sorted_chunks, 1):
-                md = ch["metadata"]
-                log.info(
-                    "   [%d] %s | %s | p.%s | dist=%.3f | rerank=%.3f | tags=%s",
-                    i,
-                    md.get("source_file", "?"),
-                    md.get("pub_date", "?"),
-                    md.get("page_number", "?"),
-                    ch.get("distance", -1),
-                    ch.get("rerank_score", -1),
-                    md.get("topic_tags", "")[:50],
-                )
-        else:
-            system_prompt = build_direct_system_prompt()
-            log.info(
-                "\033[36m[CHROMA]\033[0m \033[31m0 chunks\033[0m (%.0fms) → sin contexto",
-                dt_search,
-            )
+    elif needs_retrieval:
+        log.info(
+            "\033[36m[CHROMA]\033[0m \033[31m0 chunks\033[0m (%.0fms) → sin contexto",
+            dt_parallel,
+        )
+        system_prompt = build_direct_system_prompt()
     else:
         system_prompt = build_direct_system_prompt()
 

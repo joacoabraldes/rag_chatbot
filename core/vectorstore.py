@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Dict, List, Optional
 
 import chromadb
@@ -85,6 +86,15 @@ def query_chunks(
             }
         )
     return chunks
+
+
+async def query_chunks_async(
+    query: str,
+    k: int = 8,
+    collection_name: str | None = None,
+) -> List[Dict]:
+    """Async wrapper around query_chunks — runs in a thread pool."""
+    return await asyncio.to_thread(query_chunks, query, k, collection_name)
 
 
 def list_collections() -> List[str]:

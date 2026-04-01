@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """FastAPI entry point — mounts API routes and serves static files."""
 
+import logging
+from contextlib import asynccontextmanager
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,9 +17,25 @@ from fastapi.staticfiles import StaticFiles
 
 from api.routes import router
 
+log = logging.getLogger("rag")
+
 _BASE = Path(__file__).parent
 
-app = FastAPI(title="RAG Chatbot API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Preload ML models at startup to avoid cold-start on first request."""
+    log.info("Precargando modelos...")
+    from core.embedder import get_model as get_embedder
+    from core.reranker import get_model as get_reranker
+
+    get_embedder()
+    get_reranker()
+    log.info("Modelos cargados.")
+    yield
+
+
+app = FastAPI(title="RAG Chatbot API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

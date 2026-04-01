@@ -3,17 +3,17 @@
 
 import json
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from core.config import OPENAI_MODEL_FAST
 from core.prompts import CLASSIFIER_PROMPT
 
-_client = OpenAI(timeout=10.0)
+_client = AsyncOpenAI(timeout=10.0)
 
 
-def classify_intent(query: str, model: str | None = None) -> bool:
+async def classify_intent(query: str, model: str | None = None) -> bool:
     """Return True if the query requires RAG retrieval, False otherwise."""
-    resp = _client.chat.completions.create(
+    resp = await _client.chat.completions.create(
         model=model or OPENAI_MODEL_FAST,
         messages=[
             {"role": "system", "content": CLASSIFIER_PROMPT},
