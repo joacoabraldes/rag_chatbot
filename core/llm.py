@@ -14,11 +14,18 @@ _sync_client = OpenAI(timeout=30.0)
 
 async def stream_chat(messages: list, model: str | None = None) -> AsyncIterator[str]:
     """Yield text chunks from an OpenAI streaming response."""
-    stream = await _async_client.chat.completions.create(
-        model=model or OPENAI_MODEL,
-        messages=messages,
-        stream=True,
-    )
+    model_name = model or OPENAI_MODEL
+    kwargs: dict = {
+        "model": model_name,
+        "messages": messages,
+        "stream": True,
+    }
+    # Reasoning models (gpt-5*) silence the stream during internal reasoning;
+    # minimal effort keeps time-to-first-token low for a chat UX.
+    if model_name.startswith("gpt-5"):
+        kwargs["reasoning_effort"] = "minimal"
+
+    stream = await _async_client.chat.completions.create(**kwargs)
     async for chunk in stream:
         if (
             chunk.choices

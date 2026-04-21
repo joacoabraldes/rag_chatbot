@@ -15,7 +15,11 @@ from core.llm import stream_chat
 from core.prompts import build_direct_system_prompt, build_rag_system_prompt
 from core.reranker import rerank
 from core.router import classify_intent
-from core.vectorstore import list_collections, query_chunks_async
+from core.vectorstore import (
+    get_collection_summary_async,
+    list_collections,
+    query_chunks_async,
+)
 
 log = logging.getLogger("rag")
 logging.basicConfig(
@@ -36,11 +40,15 @@ def _build_context(chunks: list) -> tuple[str, list]:
     parts = []
     for i, chunk in enumerate(sorted_chunks, 1):
         md = chunk["metadata"]
-        header = (
-            f"[{i}] Fuente: {md.get('source_file', 'desconocido')} | "
-            f"Fecha: {md.get('pub_date', 'N/A')} | "
-            f"Página: {md.get('page_number', 'N/A')}"
-        )
+        header_fields = [
+            f"[{i}] Fuente: {md.get('source_file', 'desconocido')}",
+            f"Fecha: {md.get('pub_date', 'N/A')}",
+            f"Página: {md.get('page_number', 'N/A')}",
+        ]
+        topic_tags = (md.get("topic_tags") or "").strip()
+        if topic_tags:
+            header_fields.append(f"Temas: {topic_tags}")
+        header = " | ".join(header_fields)
         parts.append(f"{header}\n{chunk['text']}")
     return "\n\n".join(parts), sorted_chunks
 
@@ -55,7 +63,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         req.show_sources,
     )
 
-    # Step 1: classify intent + vector search in parallel
+    # Step 1: classify intent + vector search + collection summary in parallel
     t0 = time.perf_counter()
 
     async def _classify():
@@ -65,9 +73,17 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             logging.exception("Intent classification failed, defaulting to RAG")
             return True
 
-    needs_retrieval, chunks = await asyncio.gather(
+    async def _summary():
+        try:
+            return await get_collection_summary_async()
+        except Exception:
+            logging.exception("Collection summary failed; continuing without it")
+            return None
+
+    needs_retrieval, chunks, collection_summary = await asyncio.gather(
         _classify(),
         query_chunks_async(req.query, k=TOP_K),
+        _summary(),
     )
 
     dt_parallel = (time.perf_counter() - t0) * 1000
@@ -104,7 +120,9 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         )
 
         context, sorted_chunks = _build_context(chunks)
-        system_prompt = build_rag_system_prompt(context, req.show_sources)
+        system_prompt = build_rag_system_prompt(
+            context, req.show_sources, collection_summary
+        )
         for i, ch in enumerate(sorted_chunks, 1):
             md = ch["metadata"]
             log.info(
@@ -122,9 +140,9 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             "\033[36m[CHROMA]\033[0m \033[31m0 chunks\033[0m (%.0fms) → sin contexto",
             dt_parallel,
         )
-        system_prompt = build_direct_system_prompt()
+        system_prompt = build_direct_system_prompt(collection_summary)
     else:
-        system_prompt = build_direct_system_prompt()
+        system_prompt = build_direct_system_prompt(collection_summary)
 
     messages = [{"role": "system", "content": system_prompt}]
 
@@ -147,9 +165,14 @@ async def chat(req: ChatRequest) -> StreamingResponse:
     async def event_generator():
         full_answer = []
         t2 = time.perf_counter()
+        t_first_token: float | None = None
+        n_chunks = 0
         try:
             async for text in stream_chat(messages):
+                if t_first_token is None:
+                    t_first_token = time.perf_counter()
                 full_answer.append(text)
+                n_chunks += 1
                 yield f"data: {json.dumps(text)}\n\n"
         except Exception:
             logging.exception("Error in LLM stream")
@@ -157,12 +180,18 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                 "data: [ERROR] Ocurrió un error al generar la respuesta.\n\n"
             )
 
-        dt_llm = (time.perf_counter() - t2) * 1000
+        t_end = time.perf_counter()
+        dt_llm = (t_end - t2) * 1000
+        dt_ttft = ((t_first_token - t2) * 1000) if t_first_token else None
+        dt_stream = ((t_end - t_first_token) * 1000) if t_first_token else None
         answer_text = "".join(full_answer)
         log.info(
-            "\033[35m[LLM]\033[0m Respuesta: %d chars (%.0fms)",
+            "\033[35m[LLM]\033[0m Respuesta: %d chars | total=%.0fms | ttft=%s | stream=%s | chunks=%d",
             len(answer_text),
             dt_llm,
+            f"{dt_ttft:.0f}ms" if dt_ttft is not None else "n/a",
+            f"{dt_stream:.0f}ms" if dt_stream is not None else "n/a",
+            n_chunks,
         )
 
         yield "data: [DONE]\n\n"
@@ -172,6 +201,9 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             "retrieve": needs_retrieval,
             "chunks": len(sorted_chunks),
             "sources_sent": bool(req.show_sources and needs_retrieval and sorted_chunks),
+            "ttft_ms": round(dt_ttft) if dt_ttft is not None else None,
+            "total_ms": round(dt_llm),
+            "stream_chunks": n_chunks,
         }
         yield f"data: [META] {json.dumps(meta)}\n\n"
 
@@ -213,7 +245,13 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         yield "data: [END]\n\n"
 
     return StreamingResponse(
-        event_generator(), media_type="text/event-stream"
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 

@@ -146,20 +146,25 @@ function renderDebugBadge(bubble, meta) {
     const badge = document.createElement('div');
     badge.className = 'debug-badge';
 
+    let label;
     if (!meta.retrieve) {
-        badge.textContent = 'modo directo';
+        label = 'modo directo';
         badge.dataset.mode = 'direct';
     } else if (meta.chunks === 0) {
-        badge.textContent = 'RAG · 0 chunks';
+        label = 'RAG · 0 chunks';
         badge.dataset.mode = 'rag-empty';
     } else if (meta.sources_sent) {
-        badge.textContent = `RAG · ${meta.chunks} chunks · fuentes ✓`;
+        label = `RAG · ${meta.chunks} chunks · fuentes ✓`;
         badge.dataset.mode = 'rag-sources';
     } else {
-        badge.textContent = `RAG · ${meta.chunks} chunks · fuentes ✗`;
+        label = `RAG · ${meta.chunks} chunks · fuentes ✗`;
         badge.dataset.mode = 'rag-nosources';
     }
 
+    if (typeof meta.ttft_ms === 'number') {
+        label += ` · ttft ${meta.ttft_ms}ms`;
+    }
+    badge.textContent = label;
     bubble.appendChild(badge);
 }
 
@@ -202,8 +207,19 @@ async function sendMessage(query) {
             throw new Error(`HTTP ${response.status}`);
         }
 
-        typingEl.remove();
-        const { msgDiv, bubble, content } = createAssistantBubble();
+        // Typing indicator stays until the first real token arrives (not just
+        // when headers land) so the user does not see an empty bubble during
+        // reasoning-model think time.
+        let bubbleRefs = null;
+        let firstToken = true;
+
+        function ensureBubble() {
+            if (!bubbleRefs) {
+                typingEl.remove();
+                bubbleRefs = createAssistantBubble();
+            }
+            return bubbleRefs;
+        }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -218,6 +234,8 @@ async function sendMessage(query) {
         let needsRender = false;
 
         function doRender(final) {
+            if (!bubbleRefs) return;
+            const { content } = bubbleRefs;
             const renderText = showSources
                 ? fullAnswer
                 : fullAnswer.replace(/\(Fecha:[^)]*\)\s*\[\d+\]/g, '').replace(/\[\d+\]/g, '');
@@ -236,7 +254,7 @@ async function sendMessage(query) {
                 renderTimer = setTimeout(() => {
                     renderTimer = null;
                     if (needsRender) doRender(false);
-                }, 80);
+                }, 33);
             }
         }
 
@@ -257,6 +275,7 @@ async function sendMessage(query) {
                     break;
                 }
                 if (payload.startsWith('[ERROR]')) {
+                    ensureBubble();
                     fullAnswer += payload.slice(7).trim();
                     doRender(true);
                     continue;
@@ -267,23 +286,37 @@ async function sendMessage(query) {
                 }
                 if (payload.startsWith('[META] ')) {
                     try { meta = JSON.parse(payload.slice(7)); } catch(e) {}
+                    const { bubble } = ensureBubble();
                     renderDebugBadge(bubble, meta);
                     continue;
                 }
                 if (payload.startsWith('[SOURCES] ')) {
                     try { sources = JSON.parse(payload.slice(10)); } catch(e) {}
+                    const { bubble } = ensureBubble();
                     renderSourceBadges(bubble, sources);
                     scrollToBottom();
                     continue;
                 }
 
-                try { fullAnswer += JSON.parse(payload); } catch (e) { fullAnswer += payload; }
+                let token = payload;
+                try { token = JSON.parse(payload); } catch (e) {}
+                if (firstToken) {
+                    ensureBubble();
+                    firstToken = false;
+                }
+                fullAnswer += token;
                 scheduleRender();
             }
         }
 
         if (needsRender || renderTimer) {
             doRender(true);
+        }
+
+        // Safety net: stream closed without any token, META, or SOURCES payload.
+        if (!bubbleRefs) {
+            const { content } = ensureBubble();
+            content.textContent = 'Sin respuesta del modelo.';
         }
 
         state.messages.push({

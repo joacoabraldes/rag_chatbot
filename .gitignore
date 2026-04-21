@@ -37,3 +37,38 @@ Desktop.ini
 docs/*.pdf
 
 .claude
+
+# Office / presentaciones (artefactos, no código)
+*.pptx
+*.pptm
+*.ppt
+*.docx
+*.xlsx
+generate_pptx.py
+
+# Scripts de debug / probes locales (no son parte del producto)
+scripts/sse_probe.py
+
+# Temporales y backups
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+tmp/
+temp/
+
+# Tests y coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+# Logs
+*.log
+logs/
+

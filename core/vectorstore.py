@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Dict, List, Optional
 
 import chromadb
@@ -12,6 +13,11 @@ from core.config import CHROMA_COLLECTION, CHROMA_DB_DIR
 from core.embedder import embed_query, embed_texts
 
 _client: chromadb.PersistentClient | None = None
+
+# Cache for collection summary — recomputed every TTL seconds.
+# Full metadata scan on 2k chunks is ~100-300ms; cache avoids paying that per request.
+_SUMMARY_TTL_SECONDS = 300.0
+_summary_cache: Dict[str, Dict] = {}  # keyed by collection name
 
 
 def get_client() -> chromadb.PersistentClient:
@@ -101,3 +107,70 @@ def list_collections() -> List[str]:
     """Return names of all ChromaDB collections."""
     client = get_client()
     return [c.name for c in client.list_collections()]
+
+
+def get_collection_summary(
+    collection_name: str | None = None,
+    force_refresh: bool = False,
+) -> Dict:
+    """Return aggregate stats about the collection (for injecting into prompts).
+
+    Fields: total_chunks, total_docs, date_min, date_max, latest_file.
+    Cached for ``_SUMMARY_TTL_SECONDS`` to avoid scanning metadata on every request.
+    """
+    name = collection_name or CHROMA_COLLECTION
+    now = time.time()
+    cached = _summary_cache.get(name)
+    if not force_refresh and cached and cached["expires_at"] > now:
+        return cached["data"]
+
+    collection = get_collection(name)
+    count = collection.count()
+    if count == 0:
+        summary = {
+            "total_chunks": 0,
+            "total_docs": 0,
+            "date_min": None,
+            "date_max": None,
+            "latest_file": None,
+        }
+    else:
+        res = collection.get(include=["metadatas"])
+        metas = res.get("metadatas") or []
+        dates = sorted(
+            {m.get("pub_date") for m in metas if m.get("pub_date")}
+        )
+        # Map each source_file to its most recent pub_date
+        file_dates: Dict[str, str] = {}
+        for m in metas:
+            f = m.get("source_file")
+            d = m.get("pub_date", "") or ""
+            if not f:
+                continue
+            if f not in file_dates or d > file_dates[f]:
+                file_dates[f] = d
+        latest_file = (
+            max(file_dates.items(), key=lambda kv: kv[1])[0]
+            if file_dates
+            else None
+        )
+        summary = {
+            "total_chunks": count,
+            "total_docs": len(file_dates),
+            "date_min": dates[0] if dates else None,
+            "date_max": dates[-1] if dates else None,
+            "latest_file": latest_file,
+        }
+
+    _summary_cache[name] = {
+        "data": summary,
+        "expires_at": now + _SUMMARY_TTL_SECONDS,
+    }
+    return summary
+
+
+async def get_collection_summary_async(
+    collection_name: str | None = None,
+) -> Dict:
+    """Async wrapper — runs the (potentially slow) scan in a thread pool."""
+    return await asyncio.to_thread(get_collection_summary, collection_name)

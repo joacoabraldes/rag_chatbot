@@ -28,9 +28,22 @@ async def lifespan(app: FastAPI):
     log.info("Precargando modelos...")
     from core.embedder import get_model as get_embedder
     from core.reranker import get_model as get_reranker
+    from core.vectorstore import get_collection_summary
 
     get_embedder()
     get_reranker()
+    # Warm the collection-summary cache so the first request doesn't pay the scan.
+    try:
+        summary = get_collection_summary()
+        log.info(
+            "Colección: %d docs, %d chunks, fechas %s -> %s",
+            summary.get("total_docs", 0),
+            summary.get("total_chunks", 0),
+            summary.get("date_min"),
+            summary.get("date_max"),
+        )
+    except Exception:
+        log.exception("No se pudo precomputar el resumen de la colección")
     log.info("Modelos cargados.")
     yield
 
