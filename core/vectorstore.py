@@ -65,8 +65,14 @@ def query_chunks(
     query: str,
     k: int = 8,
     collection_name: str | None = None,
+    where: Optional[Dict] = None,
 ) -> List[Dict]:
-    """Query ChromaDB and return the top-k results as dicts."""
+    """Query ChromaDB and return the top-k results as dicts.
+
+    When ``where`` is provided it is passed to ``collection.query()`` as a
+    metadata filter (e.g. ``{"source_file": {"$in": [...]}}``) — the vector
+    search is then scoped to matching chunks only.
+    """
     collection = get_collection(collection_name)
     embedding = embed_query(query).tolist()
 
@@ -75,14 +81,22 @@ def query_chunks(
         return []
     n = min(k, count)
 
-    results = collection.query(
-        query_embeddings=[embedding],
-        n_results=n,
-        include=["documents", "metadatas", "distances"],
-    )
+    query_kwargs = {
+        "query_embeddings": [embedding],
+        "n_results": n,
+        "include": ["documents", "metadatas", "distances"],
+    }
+    if where:
+        query_kwargs["where"] = where
+
+    results = collection.query(**query_kwargs)
+
+    ids = results.get("ids") or [[]]
+    if not ids or not ids[0]:
+        return []
 
     chunks: List[Dict] = []
-    for i in range(len(results["ids"][0])):
+    for i in range(len(ids[0])):
         chunks.append(
             {
                 "id": results["ids"][0][i],
@@ -98,9 +112,10 @@ async def query_chunks_async(
     query: str,
     k: int = 8,
     collection_name: str | None = None,
+    where: Optional[Dict] = None,
 ) -> List[Dict]:
     """Async wrapper around query_chunks — runs in a thread pool."""
-    return await asyncio.to_thread(query_chunks, query, k, collection_name)
+    return await asyncio.to_thread(query_chunks, query, k, collection_name, where)
 
 
 def list_collections() -> List[str]:
@@ -133,6 +148,7 @@ def get_collection_summary(
             "date_min": None,
             "date_max": None,
             "latest_file": None,
+            "file_dates": {},
         }
     else:
         res = collection.get(include=["metadatas"])
@@ -160,6 +176,11 @@ def get_collection_summary(
             "date_min": dates[0] if dates else None,
             "date_max": dates[-1] if dates else None,
             "latest_file": latest_file,
+            # Full mapping of filename -> latest pub_date. Used by the filter
+            # extractor to resolve hints ("20260417") to real file names for
+            # a ChromaDB where-clause. Not included in the system-prompt
+            # summary block (see format_collection_summary in prompts.py).
+            "file_dates": file_dates,
         }
 
     _summary_cache[name] = {

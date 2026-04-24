@@ -81,6 +81,36 @@ CLASSIFIER_PROMPT = (
     'Respondé SOLO con JSON: {"retrieve": true} o {"retrieve": false}'
 )
 
+QUERY_REWRITE_PROMPT = (
+    "Eres un reescritor de queries para un sistema de búsqueda vectorial. "
+    "Recibís el historial de una conversación y la última pregunta del usuario. "
+    "Tu tarea es devolver UNA SOLA pregunta autocontenida en español que pueda "
+    "responderse sin leer el historial.\n\n"
+    "REGLAS:\n"
+    "- Resolvé referencias implícitas (anáforas, pronombres, 'eso', 'lo anterior', "
+    "'el mes pasado', 'el informe que mencionaste') usando el historial.\n"
+    "- Mantené todos los términos técnicos y entidades (nombres propios, siglas, "
+    "cifras, fechas) tal cual aparecen.\n"
+    "- Si la pregunta ya es autocontenida, devolvéla igual.\n"
+    "- No agregues explicaciones, no respondas la pregunta, no uses comillas.\n"
+    "- Respondé en una sola línea, sin prefijos como 'Pregunta:'."
+)
+
+FOLLOWUP_PROMPT = (
+    "Eres un asistente económico. Dada una pregunta del usuario y la respuesta "
+    "que se le dio, proponé 3 preguntas de seguimiento naturales, concisas y "
+    "útiles que el usuario probablemente querría hacer a continuación.\n\n"
+    "REGLAS:\n"
+    "- En español rioplatense, tono conversacional.\n"
+    "- Máximo 90 caracteres cada una.\n"
+    "- Deben profundizar, comparar o abrir aristas nuevas sobre el mismo tema.\n"
+    "- Evitá preguntas genéricas ('¿querés saber más?').\n"
+    "- Evitá repetir lo ya respondido.\n\n"
+    'Respondé SOLO con un array JSON de 3 strings. Ejemplo: '
+    '["¿Cómo evolucionó en el último trimestre?", "¿Qué impacto tuvo en el PBI?", '
+    '"¿Cuál es la proyección para 2026?"]'
+)
+
 
 def build_rag_system_prompt(
     context: str,

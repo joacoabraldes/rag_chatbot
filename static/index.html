@@ -12,6 +12,25 @@
 </head>
 <body>
 
+<!-- Source preview drawer -->
+<div id="source-overlay" class="settings-overlay"></div>
+<aside id="source-drawer" class="source-drawer" aria-hidden="true">
+    <div class="source-drawer-header">
+        <div class="source-drawer-title">
+            <span class="source-drawer-idx" id="source-drawer-idx">[?]</span>
+            <span class="source-drawer-name" id="source-drawer-name">—</span>
+        </div>
+        <button class="icon-btn" id="btn-close-source" title="Cerrar">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+    </div>
+    <div class="source-drawer-meta" id="source-drawer-meta"></div>
+    <div class="source-drawer-body">
+        <div class="source-drawer-label">Fragmento citado</div>
+        <div class="source-drawer-text" id="source-drawer-text"></div>
+    </div>
+</aside>
+
 <!-- Settings overlay -->
 <div id="settings-overlay" class="settings-overlay"></div>
 <div id="settings-panel" class="settings-panel">

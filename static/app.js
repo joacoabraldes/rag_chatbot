@@ -109,6 +109,9 @@ function renderSourceBadges(bubble, sources) {
     sources.forEach((src) => {
         const ref = document.createElement('div');
         ref.className = 'source-ref';
+        ref.setAttribute('role', 'button');
+        ref.setAttribute('tabindex', '0');
+        ref.title = 'Ver fragmento citado';
 
         const idxSpan = document.createElement('span');
         idxSpan.className = 'source-ref-idx';
@@ -135,10 +138,92 @@ function renderSourceBadges(bubble, sources) {
             ref.appendChild(pageSpan);
         }
 
+        ref.addEventListener('click', () => openSourceDrawer(src));
+        ref.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                openSourceDrawer(src);
+            }
+        });
+
         container.appendChild(ref);
     });
 
     bubble.appendChild(container);
+}
+
+function renderFollowups(bubble, followups) {
+    if (!followups || followups.length === 0) return;
+
+    const container = document.createElement('div');
+    container.className = 'followups';
+
+    const label = document.createElement('div');
+    label.className = 'followups-label';
+    label.innerHTML = `
+        <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+        <span>Seguir explorando</span>
+    `;
+    container.appendChild(label);
+
+    const chips = document.createElement('div');
+    chips.className = 'followups-chips';
+    followups.forEach((q) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'followup-chip';
+        btn.textContent = q;
+        btn.addEventListener('click', () => {
+            if (state.isStreaming) return;
+            // Disable all chips in this message once one is clicked.
+            container.querySelectorAll('.followup-chip').forEach(c => c.disabled = true);
+            sendMessage(q);
+        });
+        chips.appendChild(btn);
+    });
+    container.appendChild(chips);
+
+    bubble.appendChild(container);
+    scrollToBottom();
+}
+
+// ─── Source Preview Drawer ─────────────────────────────────────────
+function openSourceDrawer(src) {
+    const drawer = document.getElementById('source-drawer');
+    const overlay = document.getElementById('source-overlay');
+    document.getElementById('source-drawer-idx').textContent = `[${src.index}]`;
+    document.getElementById('source-drawer-name').textContent = src.source_file || 'desconocido';
+
+    const meta = document.getElementById('source-drawer-meta');
+    meta.innerHTML = '';
+    if (src.pub_date) {
+        const el = document.createElement('span');
+        el.innerHTML = `<strong>Fecha:</strong> ${escapeHtml(src.pub_date)}`;
+        meta.appendChild(el);
+    }
+    if (src.page_number) {
+        const el = document.createElement('span');
+        el.innerHTML = `<strong>Página:</strong> ${escapeHtml(String(src.page_number))}`;
+        meta.appendChild(el);
+    }
+    if (src.topic_tags) {
+        const el = document.createElement('span');
+        el.innerHTML = `<strong>Temas:</strong> ${escapeHtml(src.topic_tags)}`;
+        meta.appendChild(el);
+    }
+
+    const textEl = document.getElementById('source-drawer-text');
+    textEl.textContent = src.text || 'Sin texto disponible.';
+
+    overlay.classList.add('visible');
+    drawer.classList.add('visible');
+    drawer.setAttribute('aria-hidden', 'false');
+}
+
+function closeSourceDrawer() {
+    document.getElementById('source-drawer').classList.remove('visible');
+    document.getElementById('source-overlay').classList.remove('visible');
+    document.getElementById('source-drawer').setAttribute('aria-hidden', 'true');
 }
 
 function renderDebugBadge(bubble, meta) {
@@ -297,6 +382,13 @@ async function sendMessage(query) {
                     scrollToBottom();
                     continue;
                 }
+                if (payload.startsWith('[FOLLOWUPS] ')) {
+                    let followups = [];
+                    try { followups = JSON.parse(payload.slice(12)); } catch(e) {}
+                    const { bubble } = ensureBubble();
+                    renderFollowups(bubble, followups);
+                    continue;
+                }
 
                 let token = payload;
                 try { token = JSON.parse(payload); } catch (e) {}
@@ -376,6 +468,16 @@ function toggleSettings(show) {
 document.getElementById('btn-settings').addEventListener('click', () => toggleSettings(true));
 document.getElementById('btn-close-settings').addEventListener('click', () => toggleSettings(false));
 document.getElementById('settings-overlay').addEventListener('click', () => toggleSettings(false));
+
+// Source drawer close handlers
+document.getElementById('btn-close-source').addEventListener('click', closeSourceDrawer);
+document.getElementById('source-overlay').addEventListener('click', closeSourceDrawer);
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        closeSourceDrawer();
+        toggleSettings(false);
+    }
+});
 
 // Theme buttons
 document.querySelectorAll('.theme-option').forEach(btn => {

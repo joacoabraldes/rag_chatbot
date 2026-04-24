@@ -11,8 +11,10 @@ from fastapi.responses import StreamingResponse
 
 from api.models import ChatRequest
 from core.config import RERANK_TOP_N, TOP_K
+from core.followups import generate_followups
 from core.llm import stream_chat
 from core.prompts import build_direct_system_prompt, build_rag_system_prompt
+from core.query_rewriter import rewrite_standalone
 from core.reranker import rerank
 from core.router import classify_intent
 from core.vectorstore import (
@@ -63,7 +65,33 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         req.show_sources,
     )
 
-    # Step 1: classify intent + vector search + collection summary in parallel
+    # Step 1a: rewrite the query for retrieval if history exists.
+    # Without history the rewriter is a no-op (returns the original query),
+    # so we skip the LLM call entirely — only multi-turn queries pay for it.
+    history_for_rewrite = req.history or []
+    has_history = any(
+        m.get("role") in ("user", "assistant") for m in history_for_rewrite
+    )
+    t_rewrite = time.perf_counter()
+    if has_history:
+        retrieval_query = await rewrite_standalone(req.query, history_for_rewrite)
+        dt_rewrite = (time.perf_counter() - t_rewrite) * 1000
+        if retrieval_query.strip() != req.query.strip():
+            log.info(
+                "\033[96m[REWRITE]\033[0m %.0fms | '%s' → '%s'",
+                dt_rewrite,
+                req.query[:60],
+                retrieval_query[:60],
+            )
+        else:
+            log.info(
+                "\033[96m[REWRITE]\033[0m %.0fms | sin cambios",
+                dt_rewrite,
+            )
+    else:
+        retrieval_query = req.query
+
+    # Step 1b: classify intent + vector search + collection summary in parallel
     t0 = time.perf_counter()
 
     async def _classify():
@@ -82,7 +110,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
 
     needs_retrieval, chunks, collection_summary = await asyncio.gather(
         _classify(),
-        query_chunks_async(req.query, k=TOP_K),
+        query_chunks_async(retrieval_query, k=TOP_K),
         _summary(),
     )
 
@@ -110,7 +138,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         )
 
         t_rerank = time.perf_counter()
-        chunks = rerank(req.query, chunks, top_n=RERANK_TOP_N)
+        chunks = rerank(retrieval_query, chunks, top_n=RERANK_TOP_N)
         dt_rerank = (time.perf_counter() - t_rerank) * 1000
         log.info(
             "\033[34m[RERANK]\033[0m %d → %d chunks (%.0fms)",
@@ -204,10 +232,14 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             "ttft_ms": round(dt_ttft) if dt_ttft is not None else None,
             "total_ms": round(dt_llm),
             "stream_chunks": n_chunks,
+            "rewritten": (
+                retrieval_query if retrieval_query.strip() != req.query.strip() else None
+            ),
         }
-        yield f"data: [META] {json.dumps(meta)}\n\n"
+        yield f"data: [META] {json.dumps(meta, ensure_ascii=False)}\n\n"
 
-        # Send sources metadata if applicable
+        # Send sources metadata if applicable — includes chunk text so the
+        # frontend can show a preview drawer without a second round-trip.
         if req.show_sources and needs_retrieval and sorted_chunks:
             sources = []
             for i, chunk in enumerate(sorted_chunks, 1):
@@ -219,6 +251,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                         "pub_date": md.get("pub_date", ""),
                         "page_number": md.get("page_number", ""),
                         "topic_tags": md.get("topic_tags", ""),
+                        "text": chunk.get("text", ""),
                     }
                 )
             log.info(
@@ -241,6 +274,32 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                 "\033[32m[SOURCES]\033[0m No se envían fuentes (%s)",
                 ", ".join(reasons) if reasons else "?",
             )
+
+        # Generate 3 follow-up suggestions after the answer is complete.
+        # Skip if the answer is empty or was an error.
+        if answer_text.strip() and not answer_text.startswith("[ERROR]"):
+            t_fu = time.perf_counter()
+            try:
+                followups = await generate_followups(req.query, answer_text)
+            except Exception:
+                logging.exception("Follow-ups generation failed")
+                followups = []
+            dt_fu = (time.perf_counter() - t_fu) * 1000
+            if followups:
+                log.info(
+                    "\033[95m[FOLLOWUPS]\033[0m %d sugerencias (%.0fms)",
+                    len(followups),
+                    dt_fu,
+                )
+                yield (
+                    f"data: [FOLLOWUPS] "
+                    f"{json.dumps(followups, ensure_ascii=False)}\n\n"
+                )
+            else:
+                log.info(
+                    "\033[95m[FOLLOWUPS]\033[0m sin sugerencias (%.0fms)",
+                    dt_fu,
+                )
 
         yield "data: [END]\n\n"
 
