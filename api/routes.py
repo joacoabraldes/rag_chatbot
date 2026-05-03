@@ -11,12 +11,14 @@ from fastapi.responses import StreamingResponse
 
 from api.models import ChatRequest
 from core.config import RERANK_TOP_N, TOP_K
+from core.filter_extractor import extract_retrieval_filter
 from core.followups import generate_followups
 from core.llm import stream_chat
 from core.prompts import build_direct_system_prompt, build_rag_system_prompt
 from core.query_rewriter import rewrite_standalone
 from core.reranker import rerank
 from core.router import classify_intent
+from core.sql_tools import TOOLS as SQL_TOOLS
 from core.vectorstore import (
     get_collection_summary_async,
     list_collections,
@@ -47,12 +49,36 @@ def _build_context(chunks: list) -> tuple[str, list]:
             f"Fecha: {md.get('pub_date', 'N/A')}",
             f"Página: {md.get('page_number', 'N/A')}",
         ]
+        section = (md.get("section") or "").strip()
+        if section:
+            header_fields.append(f"Sección: {section}")
         topic_tags = (md.get("topic_tags") or "").strip()
         if topic_tags:
             header_fields.append(f"Temas: {topic_tags}")
         header = " | ".join(header_fields)
         parts.append(f"{header}\n{chunk['text']}")
     return "\n\n".join(parts), sorted_chunks
+
+
+async def _retrieve_chunks_with_filter_fallback(
+    retrieval_query: str,
+    where: dict | None,
+) -> tuple[list, bool]:
+    """Run filtered retrieval and retry without filters if it returns no chunks."""
+    chunks = await query_chunks_async(
+        retrieval_query,
+        k=TOP_K,
+        where=where,
+    )
+    if chunks or where is None:
+        return chunks, False
+
+    fallback_chunks = await query_chunks_async(
+        retrieval_query,
+        k=TOP_K,
+        where=None,
+    )
+    return fallback_chunks, True
 
 
 @router.post("/chat")
@@ -91,7 +117,8 @@ async def chat(req: ChatRequest) -> StreamingResponse:
     else:
         retrieval_query = req.query
 
-    # Step 1b: classify intent + vector search + collection summary in parallel
+    # Step 1b: classify intent + collection summary in parallel.
+    # Retrieval query runs after this step so we can apply metadata filters.
     t0 = time.perf_counter()
 
     async def _classify():
@@ -108,9 +135,8 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             logging.exception("Collection summary failed; continuing without it")
             return None
 
-    needs_retrieval, chunks, collection_summary = await asyncio.gather(
+    needs_retrieval, collection_summary = await asyncio.gather(
         _classify(),
-        query_chunks_async(retrieval_query, k=TOP_K),
         _summary(),
     )
 
@@ -127,16 +153,45 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             dt_parallel,
         )
 
+    chunks: list = []
+    filter_info = {"where": None, "extracted": {}, "applied": False}
+
+    if needs_retrieval:
+        t_filter = time.perf_counter()
+        filter_info = await extract_retrieval_filter(
+            retrieval_query,
+            collection_summary,
+        )
+        dt_filter = (time.perf_counter() - t_filter) * 1000
+        if filter_info.get("applied"):
+            log.info(
+                "\033[92m[FILTER]\033[0m applied=true (%.0fms) | %s",
+                dt_filter,
+                json.dumps(filter_info.get("extracted", {}), ensure_ascii=False),
+            )
+        else:
+            log.info("\033[92m[FILTER]\033[0m applied=false (%.0fms)", dt_filter)
+
+        t_q = time.perf_counter()
+        chunks, used_fallback = await _retrieve_chunks_with_filter_fallback(
+            retrieval_query,
+            where=filter_info.get("where"),
+        )
+        dt_q = (time.perf_counter() - t_q) * 1000
+        log.info(
+            "\033[36m[CHROMA]\033[0m %d chunks recuperados (%.0fms)",
+            len(chunks),
+            dt_q,
+        )
+        if used_fallback:
+            log.info(
+                "\033[36m[CHROMA]\033[0m fallback sin filtros aplicado (consulta filtrada sin resultados)",
+            )
+
     # Step 2: build messages
     sorted_chunks: list = []
 
     if needs_retrieval and chunks:
-        log.info(
-            "\033[36m[CHROMA]\033[0m %d chunks recuperados (%.0fms, parallel)",
-            len(chunks),
-            dt_parallel,
-        )
-
         t_rerank = time.perf_counter()
         chunks = rerank(retrieval_query, chunks, top_n=RERANK_TOP_N)
         dt_rerank = (time.perf_counter() - t_rerank) * 1000
@@ -154,12 +209,13 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         for i, ch in enumerate(sorted_chunks, 1):
             md = ch["metadata"]
             log.info(
-                "   [%d] %s | %s | p.%s | dist=%.3f | rerank=%.3f | tags=%s",
+                "   [%d] %s | %s | p.%s | sec=%s | sim=%.3f | rerank=%.3f | tags=%s",
                 i,
                 md.get("source_file", "?"),
                 md.get("pub_date", "?"),
                 md.get("page_number", "?"),
-                ch.get("distance", -1),
+                md.get("section", "?"),
+                ch.get("similarity", 1.0 - ch.get("distance", 1.0)),
                 ch.get("rerank_score", -1),
                 md.get("topic_tags", "")[:50],
             )
@@ -196,7 +252,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         t_first_token: float | None = None
         n_chunks = 0
         try:
-            async for text in stream_chat(messages):
+            async for text in stream_chat(messages, tools=SQL_TOOLS):
                 if t_first_token is None:
                     t_first_token = time.perf_counter()
                 full_answer.append(text)
@@ -227,6 +283,8 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         # Send routing metadata for debug badge
         meta = {
             "retrieve": needs_retrieval,
+            "filter_applied": bool(filter_info.get("applied")),
+            "filter": filter_info.get("extracted", {}),
             "chunks": len(sorted_chunks),
             "sources_sent": bool(req.show_sources and needs_retrieval and sorted_chunks),
             "ttft_ms": round(dt_ttft) if dt_ttft is not None else None,
@@ -250,6 +308,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                         "source_file": md.get("source_file", ""),
                         "pub_date": md.get("pub_date", ""),
                         "page_number": md.get("page_number", ""),
+                        "section": md.get("section", ""),
                         "topic_tags": md.get("topic_tags", ""),
                         "text": chunk.get("text", ""),
                     }

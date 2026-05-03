@@ -72,3 +72,6 @@ htmlcov/
 *.log
 logs/
 
+pipeline.md
+
+CLAUDE.md

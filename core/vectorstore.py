@@ -9,7 +9,11 @@ from typing import Dict, List, Optional
 
 import chromadb
 
-from core.config import CHROMA_COLLECTION, CHROMA_DB_DIR
+from core.config import (
+    CHROMA_COLLECTION,
+    CHROMA_DB_DIR,
+    SIMILARITY_THRESHOLD_RETRIEVAL,
+)
 from core.embedder import embed_query, embed_texts
 
 _client: chromadb.PersistentClient | None = None
@@ -66,13 +70,24 @@ def query_chunks(
     k: int = 8,
     collection_name: str | None = None,
     where: Optional[Dict] = None,
+    similarity_threshold: float | None = None,
 ) -> List[Dict]:
-    """Query ChromaDB and return the top-k results as dicts.
+    """Query ChromaDB and return chunks above a similarity floor.
+
+    Hybrid retrieval: keep up to ``k`` chunks AND drop anything whose
+    cosine similarity is below ``similarity_threshold``. Pass
+    ``similarity_threshold=0.0`` to disable the floor.
+
+    For Chroma's cosine space ``distance ∈ [0, 2]`` and
+    ``similarity = 1 - distance``.
 
     When ``where`` is provided it is passed to ``collection.query()`` as a
     metadata filter (e.g. ``{"source_file": {"$in": [...]}}``) — the vector
     search is then scoped to matching chunks only.
     """
+    if similarity_threshold is None:
+        similarity_threshold = SIMILARITY_THRESHOLD_RETRIEVAL
+
     collection = get_collection(collection_name)
     embedding = embed_query(query).tolist()
 
@@ -97,12 +112,17 @@ def query_chunks(
 
     chunks: List[Dict] = []
     for i in range(len(ids[0])):
+        distance = results["distances"][0][i]
+        similarity = 1.0 - distance
+        if similarity_threshold > 0 and similarity < similarity_threshold:
+            continue
         chunks.append(
             {
                 "id": results["ids"][0][i],
                 "text": results["documents"][0][i],
                 "metadata": results["metadatas"][0][i],
-                "distance": results["distances"][0][i],
+                "distance": distance,
+                "similarity": similarity,
             }
         )
     return chunks
@@ -113,9 +133,12 @@ async def query_chunks_async(
     k: int = 8,
     collection_name: str | None = None,
     where: Optional[Dict] = None,
+    similarity_threshold: float | None = None,
 ) -> List[Dict]:
     """Async wrapper around query_chunks — runs in a thread pool."""
-    return await asyncio.to_thread(query_chunks, query, k, collection_name, where)
+    return await asyncio.to_thread(
+        query_chunks, query, k, collection_name, where, similarity_threshold
+    )
 
 
 def list_collections() -> List[str]:
@@ -195,3 +218,23 @@ async def get_collection_summary_async(
 ) -> Dict:
     """Async wrapper — runs the (potentially slow) scan in a thread pool."""
     return await asyncio.to_thread(get_collection_summary, collection_name)
+
+
+# ---------------------------------------------------------------------------
+# Backend switch — keep ChromaDB as the default; flip to Postgres / pgvector
+# by exporting VECTOR_BACKEND=postgres in the environment. The late re-import
+# below shadows the public symbols above, so callers can keep doing
+# ``from core.vectorstore import query_chunks`` without changes.
+# ---------------------------------------------------------------------------
+
+from core.config import VECTOR_BACKEND  # noqa: E402
+
+if VECTOR_BACKEND == "postgres":
+    from core.pg_vectorstore import (  # noqa: E402,F401
+        add_chunks,
+        get_collection_summary,
+        get_collection_summary_async,
+        list_collections,
+        query_chunks,
+        query_chunks_async,
+    )

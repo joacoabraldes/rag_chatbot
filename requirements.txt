@@ -7,3 +7,6 @@ chromadb>=1.0.0
 sentence-transformers>=3.0.1
 pdfplumber>=0.11.0
 numpy>=1.26.0
+tiktoken>=0.7.0
+psycopg[binary]>=3.2.0
+pgvector>=0.3.0
