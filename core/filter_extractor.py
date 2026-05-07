@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Extract structured metadata filters from user queries for Chroma where clauses."""
+"""Extract structured metadata filters from user queries for retrieval.
+
+Emits a ``where`` dict in Chroma-style syntax (``$and``/``$or``/``$in``)
+which is then translated to SQL by ``core.vectorstore``. The dict shape
+is intentionally backend-agnostic so the extractor stays decoupled.
+"""
 
 from __future__ import annotations
 
 import json
 import re
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 from openai import AsyncOpenAI
 
@@ -14,6 +19,9 @@ from core.config import OPENAI_MODEL_FAST
 from core.prompts import FILTER_EXTRACTOR_PROMPT
 from core.sections import canonicalize_section, section_keys, section_taxonomy_for_prompt
 from core.taxonomy import canonicalize_topics, taxonomy_for_prompt
+
+if TYPE_CHECKING:
+    from core.observability import RequestTrace
 
 _client = AsyncOpenAI(timeout=10.0)
 
@@ -78,7 +86,7 @@ def _files_in_date_range(
 
 
 def _build_where_clause(extracted: Dict, file_dates: Dict[str, str]) -> Optional[Dict]:
-    """Convert extracted filters into a ChromaDB where dict."""
+    """Convert extracted filters into a where dict (Chroma-style syntax)."""
     if not extracted:
         return None
 
@@ -111,8 +119,10 @@ def _build_where_clause(extracted: Dict, file_dates: Dict[str, str]) -> Optional
     if source_file_in:
         clauses.append({"source_file": {"$in": source_file_in}})
 
-    # Chroma's range operators are numeric-only; transform date constraints
-    # into source_file sets using the summary's file_dates map.
+    # Transform date range constraints into an explicit source_file set.
+    # The translation layer in core.vectorstore handles this correctly, but
+    # resolving filenames here keeps the prompt context (filter.extracted)
+    # human-readable for the debug badge.
     if date_from or date_to:
         range_files = _files_in_date_range(file_dates, date_from, date_to)
         if source_file_in:
@@ -148,6 +158,7 @@ async def extract_retrieval_filter(
     query: str,
     collection_summary: Optional[Dict],
     model: str | None = None,
+    trace: Optional["RequestTrace"] = None,
 ) -> Dict:
     """Return structured filter info: {where, extracted, applied}.
 
@@ -175,15 +186,20 @@ async def extract_retrieval_filter(
     )
 
     extracted: Dict = {}
+    model_name = model or OPENAI_MODEL_FAST
     try:
         resp = await _client.chat.completions.create(
-            model=model or OPENAI_MODEL_FAST,
+            model=model_name,
             messages=[
                 {"role": "system", "content": FILTER_EXTRACTOR_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             max_completion_tokens=220,
         )
+        if trace is not None and resp.usage is not None:
+            trace.add_usage(
+                model_name, resp.usage.prompt_tokens, resp.usage.completion_tokens
+            )
         raw = (resp.choices[0].message.content or "").strip()
         if raw.startswith("```"):
             raw = raw.strip("`")

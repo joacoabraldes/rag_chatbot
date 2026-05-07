@@ -9,12 +9,15 @@ question. This dramatically improves recall on multi-turn chats.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
 from openai import AsyncOpenAI
 
 from core.config import OPENAI_MODEL_FAST
 from core.prompts import QUERY_REWRITE_PROMPT
+
+if TYPE_CHECKING:
+    from core.observability import RequestTrace
 
 _client = AsyncOpenAI(timeout=10.0)
 
@@ -41,6 +44,7 @@ async def rewrite_standalone(
     query: str,
     history: Optional[List[dict]],
     model: str | None = None,
+    trace: Optional["RequestTrace"] = None,
 ) -> str:
     """Rewrite ``query`` as a standalone question using the conversation history.
 
@@ -60,15 +64,20 @@ async def rewrite_standalone(
         "Devolvé SOLO la pregunta reformulada, sin prefijos ni comillas."
     )
 
+    model_name = model or OPENAI_MODEL_FAST
     try:
         resp = await _client.chat.completions.create(
-            model=model or OPENAI_MODEL_FAST,
+            model=model_name,
             messages=[
                 {"role": "system", "content": QUERY_REWRITE_PROMPT},
                 {"role": "user", "content": user_content},
             ],
             max_completion_tokens=120,
         )
+        if trace is not None and resp.usage is not None:
+            trace.add_usage(
+                model_name, resp.usage.prompt_tokens, resp.usage.completion_tokens
+            )
         rewritten = (resp.choices[0].message.content or "").strip()
         # Strip surrounding quotes if the model ignored instructions.
         if rewritten.startswith(('"', "'")) and rewritten.endswith(('"', "'")):

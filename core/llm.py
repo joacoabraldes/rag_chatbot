@@ -12,13 +12,17 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import AsyncIterator, Iterable, List, Optional
+import time
+from typing import AsyncIterator, Iterable, List, Optional, TYPE_CHECKING
 
 from openai import AsyncOpenAI, OpenAI
 
 from core.config import OPENAI_MODEL, OPENAI_MODEL_FAST
 from core.sql_tools import execute_tool, tool_result_message
 from core.taxonomy import canonicalize_topics, taxonomy_for_prompt
+
+if TYPE_CHECKING:
+    from core.observability import RequestTrace
 
 log = logging.getLogger("rag.llm")
 
@@ -49,6 +53,10 @@ def _build_completion_kwargs(
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
+    if stream:
+        # Have OpenAI emit a final chunk with the real token usage so we can
+        # log per-call cost. Without this the streaming API skips usage.
+        kwargs["stream_options"] = {"include_usage": True}
     return kwargs
 
 
@@ -97,6 +105,7 @@ async def stream_chat(
     messages: list,
     model: str | None = None,
     tools: Optional[list] = None,
+    trace: Optional["RequestTrace"] = None,
 ) -> AsyncIterator[str]:
     """Yield text tokens from an OpenAI streaming response.
 
@@ -104,6 +113,9 @@ async def stream_chat(
     execute them transparently and re-stream until the model produces a
     plain content response. Only content tokens are yielded — the caller
     sees a single uninterrupted stream of text.
+
+    If ``trace`` is provided we record token usage per round and per tool
+    call so the request-level trace has the full cost breakdown.
     """
     model_name = model or OPENAI_MODEL
     # Mutable copy — we'll append assistant + tool messages as we loop.
@@ -117,6 +129,15 @@ async def stream_chat(
         had_content = False
 
         async for chunk in stream:
+            # The final chunk carries usage when stream_options.include_usage=True
+            # and has empty choices — record it before the choices check below.
+            if trace is not None and getattr(chunk, "usage", None) is not None:
+                trace.add_usage(
+                    model_name,
+                    chunk.usage.prompt_tokens,
+                    chunk.usage.completion_tokens,
+                )
+
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -159,6 +180,12 @@ async def stream_chat(
             kwargs = _build_completion_kwargs(model_name, convo, tools=None, stream=True)
             final = await _async_client.chat.completions.create(**kwargs)
             async for chunk in final:
+                if trace is not None and getattr(chunk, "usage", None) is not None:
+                    trace.add_usage(
+                        model_name,
+                        chunk.usage.prompt_tokens,
+                        chunk.usage.completion_tokens,
+                    )
                 if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
             return
@@ -177,12 +204,22 @@ async def stream_chat(
                 tc["name"],
                 json.dumps(args, ensure_ascii=False)[:120],
             )
+            t_tool = time.perf_counter()
             payload = await execute_tool(tc["name"] or "", args)
+            dt_tool = (time.perf_counter() - t_tool) * 1000
             n_rows = payload.get("n_rows")
-            if "error" in payload:
-                log.info("\033[33m[TOOL]\033[0m   ⮕ error: %s", payload["error"])
+            tool_error = payload.get("error")
+            if tool_error:
+                log.info("\033[33m[TOOL]\033[0m   ⮕ error: %s", tool_error)
             else:
-                log.info("\033[33m[TOOL]\033[0m   ⮕ %d filas", n_rows or 0)
+                log.info("\033[33m[TOOL]\033[0m   ⮕ %d filas (%.0fms)", n_rows or 0, dt_tool)
+            if trace is not None:
+                trace.add_tool(
+                    tc["name"] or "unknown",
+                    dt_tool,
+                    n_rows,
+                    error=tool_error,
+                )
             convo.append(tool_result_message(tc["id"] or "no-id", payload))
 
         # Loop again — model now sees the tool results and either streams

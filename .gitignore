@@ -14,12 +14,13 @@ env/
 
 # Environment variables
 .env
+.env.local
 
-# ChromaDB local storage
-chroma_db/
-
-# Chat history
+# Chat history (per-deployment, not source)
 history/
+
+# Request traces (per-deployment, not source)
+logs/
 
 # IDE
 .vscode/
@@ -33,21 +34,29 @@ Desktop.ini
 # Jupyter
 .ipynb_checkpoints/
 
-# PDFs (uploaded docs, not source code)
+# Source PDFs (not source code)
 docs/*.pdf
 
-.claude
+# Schema seed dumps (market data — load locally, not versioned)
+schema/fx.sql
+schema/forex.sql
 
-# Office / presentaciones (artefactos, no código)
+# Claude Code workspace (assistant config + transcripts)
+.claude/
+CLAUDE.md
+
+# Office artifacts
 *.pptx
 *.pptm
 *.ppt
 *.docx
 *.xlsx
-generate_pptx.py
 
-# Scripts de debug / probes locales (no son parte del producto)
+# Local debug / scratch
 scripts/sse_probe.py
+generate_pptx.py
+pipeline.md
+cambios.md
 
 # Temporales y backups
 *.tmp
@@ -58,7 +67,10 @@ scripts/sse_probe.py
 tmp/
 temp/
 
-# Tests y coverage
+# Tests, eval harness y healthchecks (uso interno, no parte del runtime)
+tests/
+scripts/eval.py
+scripts/test_connection.py
 .pytest_cache/
 .coverage
 .coverage.*
@@ -70,8 +82,3 @@ htmlcov/
 
 # Logs
 *.log
-logs/
-
-pipeline.md
-
-CLAUDE.md

@@ -166,7 +166,7 @@ FOLLOWUP_PROMPT = (
 )
 
 FILTER_EXTRACTOR_PROMPT = (
-    "Extraés filtros estructurados para retrieval en ChromaDB. "
+    "Extraés filtros estructurados para el retrieval del RAG. "
     "Recibirás una query en español, una lista de archivos disponibles con "
     "fecha ISO (YYYY-MM-DD), una taxonomía cerrada de temas, y una "
     "taxonomía cerrada de secciones del informe.\n\n"

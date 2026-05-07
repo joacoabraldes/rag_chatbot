@@ -10,14 +10,10 @@ EMBEDDING_MODEL = os.environ.get(
     "EMBEDDING_MODEL",
     "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
 )
-CHROMA_DB_DIR = os.environ.get("CHROMA_DB_DIR", "./chroma_db")
-CHROMA_COLLECTION = os.environ.get("CHROMA_COLLECTION", "informes")
 DOCS_DIR = os.environ.get("DOCS_DIR", "./docs")
-# Postgres / pgvector backend. When VECTOR_BACKEND=postgres the app uses
-# core.pg_vectorstore instead of core.vectorstore. Chroma stays as the
-# default until the migration is validated.
+# Postgres + pgvector (Supabase) is the only vector backend. The chunk
+# store and the SQL tools (fx, forex) live in the same database.
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
-VECTOR_BACKEND = os.environ.get("VECTOR_BACKEND", "chroma").lower()
 
 SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "0.75"))
 TOP_K = int(os.environ.get("TOP_K", "8"))

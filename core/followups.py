@@ -12,12 +12,15 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from typing import List
+from typing import List, Optional, TYPE_CHECKING
 
 from openai import AsyncOpenAI
 
 from core.config import OPENAI_MODEL_FAST
 from core.prompts import FOLLOWUP_PROMPT
+
+if TYPE_CHECKING:
+    from core.observability import RequestTrace
 
 _client = AsyncOpenAI(timeout=10.0)
 
@@ -89,7 +92,13 @@ def _is_assistant_perspective(text: str) -> bool:
     return False
 
 
-async def _ask_model(model: str, query: str, answer_tail: str, retry_note: str = "") -> List[str]:
+async def _ask_model(
+    model: str,
+    query: str,
+    answer_tail: str,
+    retry_note: str = "",
+    trace: Optional["RequestTrace"] = None,
+) -> List[str]:
     user_content = (
         f"Pregunta del usuario:\n{query}\n\n"
         f"Respuesta dada:\n{answer_tail}\n\n"
@@ -106,6 +115,8 @@ async def _ask_model(model: str, query: str, answer_tail: str, retry_note: str =
         ],
         max_completion_tokens=200,
     )
+    if trace is not None and resp.usage is not None:
+        trace.add_usage(model, resp.usage.prompt_tokens, resp.usage.completion_tokens)
     raw = (resp.choices[0].message.content or "").strip()
     if raw.startswith("```"):
         raw = raw.strip("`")
@@ -129,6 +140,7 @@ async def generate_followups(
     query: str,
     answer: str,
     model: str | None = None,
+    trace: Optional["RequestTrace"] = None,
 ) -> List[str]:
     """Return up to 3 short follow-up questions in Spanish.
 
@@ -147,7 +159,7 @@ async def generate_followups(
     chosen_model = model or OPENAI_MODEL_FAST
 
     try:
-        candidates = await _ask_model(chosen_model, query, trimmed_answer)
+        candidates = await _ask_model(chosen_model, query, trimmed_answer, trace=trace)
     except Exception:
         return []
 
@@ -167,6 +179,7 @@ async def generate_followups(
                     "Reformulá como el usuario pidiendo: '¿Cuál es...?', "
                     "'¿Cómo...?', 'Mostrame...', '¿Qué pasó con...?'."
                 ),
+                trace=trace,
             )
             for c in extra:
                 if c not in valid and not _is_assistant_perspective(c):
