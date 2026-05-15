@@ -14,14 +14,14 @@
 
 <!-- Source preview drawer -->
 <div id="source-overlay" class="settings-overlay"></div>
-<aside id="source-drawer" class="source-drawer" aria-hidden="true">
+<aside id="source-drawer" class="source-drawer" aria-hidden="true" aria-label="Vista previa de fuente">
     <div class="source-drawer-header">
         <div class="source-drawer-title">
             <span class="source-drawer-idx" id="source-drawer-idx">[?]</span>
             <span class="source-drawer-name" id="source-drawer-name">—</span>
         </div>
-        <button class="icon-btn" id="btn-close-source" title="Cerrar">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        <button class="icon-btn" id="btn-close-source" title="Cerrar" aria-label="Cerrar vista previa">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
     </div>
     <div class="source-drawer-meta" id="source-drawer-meta"></div>
@@ -33,27 +33,27 @@
 
 <!-- Settings overlay -->
 <div id="settings-overlay" class="settings-overlay"></div>
-<div id="settings-panel" class="settings-panel">
+<div id="settings-panel" class="settings-panel" aria-hidden="true" aria-label="Configuración">
     <div class="settings-header">
         <h3>Configuración</h3>
-        <button class="icon-btn" id="btn-close-settings" title="Cerrar">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        <button class="icon-btn" id="btn-close-settings" title="Cerrar" aria-label="Cerrar configuración">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
     </div>
 
     <div class="settings-section">
         <h4>Apariencia</h4>
-        <div class="theme-selector">
-            <button class="theme-option" data-theme-val="light" title="Modo claro">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        <div class="theme-selector" role="radiogroup" aria-label="Tema">
+            <button class="theme-option" data-theme-val="light" title="Modo claro" role="radio" aria-checked="false">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
                 Claro
             </button>
-            <button class="theme-option" data-theme-val="dark" title="Modo oscuro">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+            <button class="theme-option" data-theme-val="dark" title="Modo oscuro" role="radio" aria-checked="false">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
                 Oscuro
             </button>
-            <button class="theme-option" data-theme-val="system" title="Seguir sistema">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+            <button class="theme-option" data-theme-val="system" title="Seguir sistema" role="radio" aria-checked="false">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                 Auto
             </button>
         </div>
@@ -66,12 +66,17 @@
             <span class="toggle-slider"></span>
             <span class="toggle-label">Mostrar fuentes en respuestas</span>
         </label>
+        <label class="toggle-switch">
+            <input type="checkbox" id="toggle-debug">
+            <span class="toggle-slider"></span>
+            <span class="toggle-label">Mostrar información de debug</span>
+        </label>
     </div>
 
     <div class="settings-section">
         <h4>Acciones</h4>
         <button class="settings-btn danger" id="btn-clear-chat">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
             Limpiar chat
         </button>
     </div>
@@ -86,7 +91,7 @@
 <div class="app-container">
     <header class="app-header">
         <div class="header-left">
-            <span class="header-logo-icon">
+            <span class="header-logo-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M3 3v18h18"/>
                     <path d="M7 16l4-6 4 4 5-8" stroke-width="2"/>
@@ -99,16 +104,16 @@
             <span class="header-logo">RAG Chatbot</span>
         </div>
         <div class="header-right">
-            <button class="icon-btn" id="btn-settings" title="Configuración">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+            <button class="icon-btn" id="btn-settings" title="Configuración" aria-label="Abrir configuración">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
             </button>
         </div>
     </header>
 
-    <main id="chat-area" class="chat-area">
+    <main id="chat-area" class="chat-area" role="log" aria-live="polite" aria-relevant="additions" aria-label="Conversación">
         <div id="welcome-screen" class="welcome-screen">
             <div class="welcome-card">
-                <div class="welcome-icon">
+                <div class="welcome-icon" aria-hidden="true">
                     <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
                         <path d="M3 3v18h18" stroke="rgba(255,255,255,0.5)" stroke-width="1.5" fill="none"/>
                         <path d="M7 16l4-6 4 4 5-8" stroke="white" stroke-width="2" fill="none"/>
@@ -117,20 +122,23 @@
                 <h2>Bienvenido</h2>
                 <p>Tu asistente de inteligencia económica.<br>
                 Preguntá lo que necesites sobre los informes.</p>
+
+                <div class="suggestions-label">Probá con una de estas:</div>
+                <div id="suggestions" class="suggestions" role="list"></div>
             </div>
         </div>
     </main>
 
     <footer class="input-bar">
         <div class="input-container">
-            <textarea id="user-input" rows="1" placeholder="Hacé tu pregunta..." autocomplete="off"></textarea>
-            <button id="btn-send" class="send-btn" disabled title="Enviar">
-                <svg viewBox="0 0 24 24"><path d="M22 2 11 13"/><path d="M22 2 15 22 11 13 2 9z"/></svg>
+            <textarea id="user-input" rows="1" placeholder="Hacé tu pregunta..." autocomplete="off" aria-label="Escribí tu pregunta"></textarea>
+            <button id="btn-send" class="send-btn" disabled title="Enviar" aria-label="Enviar pregunta">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 2 11 13"/><path d="M22 2 15 22 11 13 2 9z"/></svg>
             </button>
         </div>
     </footer>
 </div>
 
-<script src="/static/app.js"></script>
+<script type="module" src="/static/app.js"></script>
 </body>
 </html>

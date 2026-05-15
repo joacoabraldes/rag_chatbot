@@ -24,12 +24,15 @@ _BASE = Path(__file__).parent
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Preload ML models at startup to avoid cold-start on first request."""
-    log.info("Precargando modelos...")
+    """Preload ML models + open DB pool at startup to avoid cold-start."""
+    log.info("Precargando modelos y pool de conexiones...")
+    from core.db import close_pool, init_pool
     from core.embedder import get_model as get_embedder
     from core.reranker import get_model as get_reranker
     from core.vectorstore import get_collection_summary
 
+    # Open the pool first so the summary call below reuses it.
+    init_pool(min_size=2, max_size=10)
     get_embedder()
     get_reranker()
     # Warm the collection-summary cache so the first request doesn't pay the scan.
@@ -45,7 +48,10 @@ async def lifespan(app: FastAPI):
     except Exception:
         log.exception("No se pudo precomputar el resumen de la colección")
     log.info("Modelos cargados.")
-    yield
+    try:
+        yield
+    finally:
+        close_pool()
 
 
 app = FastAPI(title="RAG Chatbot API", lifespan=lifespan)

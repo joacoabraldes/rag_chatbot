@@ -56,37 +56,39 @@
 [data-theme="dark"] {
     --primary: #818cf8;
     --primary-light: #a5b4fc;
-    --primary-soft: rgba(129, 140, 248, 0.08);
-    --primary-glow: rgba(129, 140, 248, 0.15);
+    --primary-soft: rgba(129, 140, 248, 0.10);
+    --primary-glow: rgba(129, 140, 248, 0.18);
 
     --accent: #fbbf24;
     --accent-light: #fcd34d;
 
     --bg: #0a0a0b;
-    --bg-subtle: #111113;
-    --surface: #18181b;
-    --surface-hover: #1f1f23;
-    --surface-raised: #27272a;
+    --bg-subtle: #131316;
+    /* Bumped one notch above --bg so the assistant bubble has a real
+       visible silhouette against the page background. */
+    --surface: #1c1c20;
+    --surface-hover: #25252a;
+    --surface-raised: #2b2b30;
 
-    --text: #f1f5f9;
-    --text-secondary: #a1a1aa;
-    --text-muted: #52525b;
+    --text: #f4f4f5;
+    --text-secondary: #b4b4b8;
+    --text-muted: #71717a;
 
-    --border: #27272a;
-    --border-subtle: #1f1f23;
+    --border: #2e2e33;
+    --border-subtle: #232328;
 
     --user-bubble: linear-gradient(135deg, #4338ca 0%, #6d28d9 100%);
     --user-text: #ffffff;
-    --assistant-bubble: #18181b;
-    --assistant-text: #e4e4e7;
+    --assistant-bubble: #1c1c20;
+    --assistant-text: #e9e9ec;
 
-    --code-bg: #09090b;
+    --code-bg: #0f0f12;
     --code-text: #e0e7ff;
 
-    --skeleton-from: #27272a;
-    --skeleton-via: #3f3f46;
+    --skeleton-from: #232328;
+    --skeleton-via: #38383f;
 
-    --danger-hover-bg: rgba(239, 68, 68, 0.1);
+    --danger-hover-bg: rgba(239, 68, 68, 0.12);
     --danger-hover-border: #f87171;
     --danger-hover-color: #f87171;
 }
@@ -95,29 +97,29 @@
     [data-theme="system"] {
         --primary: #818cf8;
         --primary-light: #a5b4fc;
-        --primary-soft: rgba(129, 140, 248, 0.08);
-        --primary-glow: rgba(129, 140, 248, 0.15);
+        --primary-soft: rgba(129, 140, 248, 0.10);
+        --primary-glow: rgba(129, 140, 248, 0.18);
         --accent: #fbbf24;
         --accent-light: #fcd34d;
         --bg: #0a0a0b;
-        --bg-subtle: #111113;
-        --surface: #18181b;
-        --surface-hover: #1f1f23;
-        --surface-raised: #27272a;
-        --text: #f1f5f9;
-        --text-secondary: #a1a1aa;
-        --text-muted: #52525b;
-        --border: #27272a;
-        --border-subtle: #1f1f23;
+        --bg-subtle: #131316;
+        --surface: #1c1c20;
+        --surface-hover: #25252a;
+        --surface-raised: #2b2b30;
+        --text: #f4f4f5;
+        --text-secondary: #b4b4b8;
+        --text-muted: #71717a;
+        --border: #2e2e33;
+        --border-subtle: #232328;
         --user-bubble: linear-gradient(135deg, #4338ca 0%, #6d28d9 100%);
         --user-text: #ffffff;
-        --assistant-bubble: #18181b;
-        --assistant-text: #e4e4e7;
-        --code-bg: #09090b;
+        --assistant-bubble: #1c1c20;
+        --assistant-text: #e9e9ec;
+        --code-bg: #0f0f12;
         --code-text: #e0e7ff;
-        --skeleton-from: #27272a;
-        --skeleton-via: #3f3f46;
-        --danger-hover-bg: rgba(239, 68, 68, 0.1);
+        --skeleton-from: #232328;
+        --skeleton-via: #38383f;
+        --danger-hover-bg: rgba(239, 68, 68, 0.12);
         --danger-hover-border: #f87171;
         --danger-hover-color: #f87171;
     }
@@ -229,9 +231,16 @@ html, body {
     flex: 1;
     overflow-y: auto;
     padding: 24px 20px;
+    padding-bottom: max(24px, env(safe-area-inset-bottom));
     scroll-behavior: smooth;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: none;
+}
+
+.chat-area .message {
+    /* Keep the last message visible above the on-screen keyboard when
+       it slides in (visualViewport handler scrolls to bottom too). */
+    scroll-margin-bottom: 24px;
 }
 
 /* ─── Welcome Screen ────────────────────────────────────────────── */
@@ -970,8 +979,10 @@ html, body {
 }
 
 /* ─── Debug Badge ───────────────────────────────────────────────── */
+/* Hidden by default — enable via Settings → "Mostrar información de
+   debug" (sets body.show-debug). */
 .debug-badge {
-    display: inline-block;
+    display: none;
     margin-top: 8px;
     padding: 2px 8px;
     border-radius: 999px;
@@ -980,7 +991,116 @@ html, body {
     opacity: 0.6;
     border: 1px solid currentColor;
 }
+body.show-debug .debug-badge {
+    display: inline-block;
+}
 .debug-badge[data-mode="direct"]        { color: var(--text-muted); }
 .debug-badge[data-mode="rag-sources"]   { color: #22c55e; }
 .debug-badge[data-mode="rag-nosources"] { color: #f59e0b; }
 .debug-badge[data-mode="rag-empty"]     { color: #ef4444; }
+
+/* ─── Empty-state Suggestions ───────────────────────────────────── */
+.suggestions-label {
+    margin-top: 28px;
+    margin-bottom: 12px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    animation: fadeSlideUp 0.5s var(--ease-out-expo) 0.4s both;
+}
+
+.suggestions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    max-width: 440px;
+    margin: 0 auto;
+}
+
+.suggestion-chip {
+    appearance: none;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 12px 14px;
+    text-align: left;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-family: inherit;
+    transition: border-color var(--duration-fast), background var(--duration-fast),
+                transform 80ms, box-shadow var(--duration-fast);
+    animation: fadeSlideUp 0.5s var(--ease-out-expo) both;
+}
+.suggestion-chip:hover {
+    border-color: var(--primary);
+    background: var(--surface-hover);
+    box-shadow: 0 4px 12px var(--primary-glow);
+    transform: translateY(-1px);
+}
+.suggestion-chip:active {
+    transform: translateY(0) scale(0.99);
+}
+.suggestion-chip:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+}
+.suggestion-chip-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--primary);
+    letter-spacing: -0.01em;
+}
+.suggestion-chip-query {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    line-height: 1.35;
+}
+
+@media (max-width: 460px) {
+    .suggestions {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ─── Skeleton Bubble (typing replacement) ──────────────────────── */
+.skeleton-bubble {
+    background: var(--assistant-bubble);
+    border: 1px solid var(--border);
+    border-radius: 20px 20px 20px 6px;
+    padding: 16px 18px;
+    max-width: 88%;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+
+.skeleton-line {
+    height: 12px;
+    border-radius: 6px;
+    background: linear-gradient(
+        90deg,
+        var(--skeleton-from) 0%,
+        var(--skeleton-via) 50%,
+        var(--skeleton-from) 100%
+    );
+    background-size: 200% 100%;
+    animation: skeletonShimmer 1.4s ease-in-out infinite;
+}
+.skeleton-line.w90 { width: 92%; }
+.skeleton-line.w75 { width: 76%; }
+.skeleton-line.w60 { width: 58%; }
+
+@keyframes skeletonShimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+/* ─── Toggle stack spacing (multiple toggles in same section) ───── */
+.settings-section .toggle-switch + .toggle-switch {
+    margin-top: 4px;
+}

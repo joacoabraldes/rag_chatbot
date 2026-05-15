@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 
 from fastapi import APIRouter
@@ -122,7 +123,12 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             retrieval_query = req.query
             sp.set(skipped=True)
 
-    # Step 1b: classify intent + collection summary in parallel.
+    # Step 1b: classify intent, collection summary, AND filter extraction —
+    # all in parallel. The filter only needs the summary (cached, fast), so
+    # it can race against the classifier. If the classifier ends up saying
+    # retrieve=false we discard the filter result; the ~300-500ms gpt-4.1-nano
+    # call is wasted on greetings/meta but saves the same time on every
+    # query that DOES need retrieval (the majority).
     async def _classify():
         try:
             return await classify_intent(req.query, trace=trace)
@@ -137,54 +143,61 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             logging.exception("Collection summary failed; continuing without it")
             return None
 
-    with trace.span("router_summary") as sp:
-        t0 = time.perf_counter()
-        needs_retrieval, collection_summary = await asyncio.gather(
-            _classify(),
-            _summary(),
-        )
-        dt_parallel = (time.perf_counter() - t0) * 1000
-        sp.set(
-            needs_retrieval=bool(needs_retrieval),
-            summary_chunks=(collection_summary or {}).get("total_chunks"),
-        )
+    async def _summary_then_filter():
+        """Get summary (cached) then extract filters speculatively.
+
+        Both spans land in the trace flat, with overlapping timing windows
+        — that's fine, observability.py keys them by name.
+        """
+        with trace.span("summary") as sp_sum:
+            summary = await _summary()
+            sp_sum.set(summary_chunks=(summary or {}).get("total_chunks"))
+        with trace.span("filter_extract") as sp_filter:
+            f_info = await extract_retrieval_filter(
+                retrieval_query, summary, trace=trace,
+            )
+            sp_filter.set(
+                applied=bool(f_info.get("applied")),
+                extracted=f_info.get("extracted", {}),
+            )
+        return summary, f_info
+
+    async def _classify_with_span():
+        with trace.span("classify") as sp:
+            r = await _classify()
+            sp.set(needs_retrieval=bool(r))
+            return r
+
+    t0 = time.perf_counter()
+    needs_retrieval, (collection_summary, filter_info) = await asyncio.gather(
+        _classify_with_span(),
+        _summary_then_filter(),
+    )
+    dt_parallel = (time.perf_counter() - t0) * 1000
 
     if needs_retrieval:
         log.info(
-            "\033[33m[ROUTER]\033[0m retrieve=\033[1;32mTRUE\033[0m  (%.0fms, parallel)",
+            "\033[33m[ROUTER]\033[0m retrieve=\033[1;32mTRUE\033[0m  (%.0fms, parallel w/ filter)",
             dt_parallel,
         )
+        if filter_info.get("applied"):
+            log.info(
+                "\033[92m[FILTER]\033[0m applied=true | %s",
+                json.dumps(filter_info.get("extracted", {}), ensure_ascii=False),
+            )
+        else:
+            log.info("\033[92m[FILTER]\033[0m applied=false")
     else:
         log.info(
             "\033[33m[ROUTER]\033[0m retrieve=\033[1;31mFALSE\033[0m (%.0fms) → respuesta directa",
             dt_parallel,
         )
+        # Discard speculative filter — it was correct work but we won't use it.
+        filter_info = {"where": None, "extracted": {}, "applied": False}
 
     chunks: list = []
-    filter_info = {"where": None, "extracted": {}, "applied": False}
 
     if needs_retrieval:
-        with trace.span("filter_extract") as sp:
-            t_filter = time.perf_counter()
-            filter_info = await extract_retrieval_filter(
-                retrieval_query,
-                collection_summary,
-                trace=trace,
-            )
-            dt_filter = (time.perf_counter() - t_filter) * 1000
-            sp.set(
-                applied=bool(filter_info.get("applied")),
-                extracted=filter_info.get("extracted", {}),
-            )
-        if filter_info.get("applied"):
-            log.info(
-                "\033[92m[FILTER]\033[0m applied=true (%.0fms) | %s",
-                dt_filter,
-                json.dumps(filter_info.get("extracted", {}), ensure_ascii=False),
-            )
-        else:
-            log.info("\033[92m[FILTER]\033[0m applied=false (%.0fms)", dt_filter)
-
         with trace.span("retrieval") as sp:
             t_q = time.perf_counter()
             chunks, used_fallback = await _retrieve_chunks_with_filter_fallback(
@@ -303,12 +316,42 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             f"{dt_stream:.0f}ms" if dt_stream is not None else "n/a",
             n_chunks,
         )
+
+        # Citation validation — catch hallucinated references like "[7]" when
+        # we only sent 3 chunks. We log to the trace and surface the count in
+        # the [META] payload below, but don't rewrite the user-visible answer
+        # (the LLM citing a missing chunk is a quality signal, not a fatal).
+        n_cited = 0
+        n_invalid_citations = 0
+        if req.show_sources and sorted_chunks:
+            cited_idxs = {int(m) for m in re.findall(r"\[(\d+)\]", answer_text)}
+            n_cited = len(cited_idxs)
+            valid_range = set(range(1, len(sorted_chunks) + 1))
+            invalid = sorted(cited_idxs - valid_range)
+            n_invalid_citations = len(invalid)
+            if invalid:
+                log.info(
+                    "\033[31m[CITES]\033[0m %d cita(s) inválida(s): %s (chunks válidos: 1..%d)",
+                    n_invalid_citations,
+                    invalid,
+                    len(sorted_chunks),
+                )
+                trace.errors.append(
+                    {
+                        "stage": "citations",
+                        "kind": "InvalidCitation",
+                        "msg": f"invalid={invalid} chunks={len(sorted_chunks)}",
+                    }
+                )
+
         llm_attrs.update(
             {
                 "duration_ms": round(dt_llm),
                 "ttft_ms": round(dt_ttft) if dt_ttft is not None else None,
                 "stream_chunks": n_chunks,
                 "answer_chars": len(answer_text),
+                "n_cited": n_cited,
+                "n_invalid_citations": n_invalid_citations,
             }
         )
         if had_error:
@@ -324,7 +367,10 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                 t_fu = time.perf_counter()
                 try:
                     followups = await generate_followups(
-                        req.query, answer_text, trace=trace
+                        req.query,
+                        answer_text,
+                        collection_summary=collection_summary,
+                        trace=trace,
                     )
                 except Exception:
                     logging.exception("Follow-ups generation failed")
@@ -362,6 +408,8 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             ),
             "tools": [t["name"] for t in trace.tools],
             "cost_usd": record["cost_usd"],
+            "n_cited": llm_attrs.get("n_cited", 0),
+            "n_invalid_citations": llm_attrs.get("n_invalid_citations", 0),
         }
         yield f"data: [META] {json.dumps(meta, ensure_ascii=False)}\n\n"
 

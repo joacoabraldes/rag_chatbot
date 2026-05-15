@@ -39,6 +39,47 @@ def _safe_iso_date(value: str | None) -> str | None:
         return None
 
 
+def _corpus_range(file_dates: Dict[str, str]) -> tuple[str | None, str | None]:
+    """Return (min_date, max_date) across the corpus, or (None, None)."""
+    dates = [d for d in file_dates.values() if d]
+    if not dates:
+        return None, None
+    return min(dates), max(dates)
+
+
+def _clamp_dates_to_corpus(
+    date_from: str | None,
+    date_to: str | None,
+    corpus_min: str | None,
+    corpus_max: str | None,
+) -> tuple[str | None, str | None]:
+    """Drop date bounds that fall entirely outside the corpus.
+
+    Why: ``gpt-4.1-nano`` sometimes emits a year off by one (training-data
+    bias toward 2024/2025). Without this guard, a wrong-year filter
+    silently returns 0 chunks and the fallback retrieval flies blind.
+
+    Rules:
+    - If both bounds are valid ISO dates but their range doesn't overlap
+      with [corpus_min, corpus_max] at all → drop both.
+    - Otherwise leave them as-is; the SQL filter naturally narrows to the
+      overlap.
+    """
+    if not corpus_min or not corpus_max:
+        return date_from, date_to
+    df, dt = date_from, date_to
+    if df and dt:
+        # Both ends specified — check if the [df, dt] range overlaps corpus.
+        # No overlap iff df > corpus_max or dt < corpus_min.
+        if df > corpus_max or dt < corpus_min:
+            return None, None
+    elif df and df > corpus_max:
+        return None, dt
+    elif dt and dt < corpus_min:
+        return df, None
+    return df, dt
+
+
 def _extract_compact_date_tokens(text: str) -> List[str]:
     return re.findall(r"\b(20\d{6})\b", text or "")
 
@@ -171,11 +212,19 @@ async def extract_retrieval_filter(
     if not file_dates:
         return {"where": None, "extracted": {}, "applied": False}
 
+    corpus_min, corpus_max = _corpus_range(file_dates)
+
     files_block = "\n".join(
         f"- {fname}: {date}" for fname, date in sorted(file_dates.items())
     )
+    range_hint = (
+        f"Rango temporal del corpus: {corpus_min} a {corpus_max}.\n"
+        if corpus_min and corpus_max
+        else ""
+    )
     user_prompt = (
         f"Query: {query}\n\n"
+        f"{range_hint}"
         "Archivos disponibles (nombre -> fecha):\n"
         f"{files_block}\n\n"
         "Taxonomía de temas permitidos:\n"
@@ -211,6 +260,18 @@ async def extract_retrieval_filter(
     except Exception:
         extracted = {}
 
+    # Validate the date range against the corpus before letting it through.
+    # The model occasionally emits a wrong year ("abril" → 2025-04-XX even
+    # though the corpus is 2026). Clamping prevents the where-clause from
+    # silently returning 0 chunks for the right month in the wrong year.
+    raw_df = _safe_iso_date(extracted.get("date_from"))
+    raw_dt = _safe_iso_date(extracted.get("date_to"))
+    clamped_df, clamped_dt = _clamp_dates_to_corpus(
+        raw_df, raw_dt, corpus_min, corpus_max
+    )
+    extracted["date_from"] = clamped_df
+    extracted["date_to"] = clamped_dt
+
     # Force text for compact-date fallback detection.
     extracted["query_text"] = query
     where = _build_where_clause(extracted, file_dates=file_dates)
@@ -227,8 +288,8 @@ async def extract_retrieval_filter(
             "source_file_in": _sanitize_source_files(
                 extracted.get("source_file_in") or [], file_dates
             ),
-            "date_from": _safe_iso_date(extracted.get("date_from")),
-            "date_to": _safe_iso_date(extracted.get("date_to")),
+            "date_from": clamped_df,
+            "date_to": clamped_dt,
             "section_in": section_in,
             "topic_keys_any": canonicalize_topics(extracted.get("topic_keys_any") or []),
         },

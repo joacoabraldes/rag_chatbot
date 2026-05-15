@@ -9,6 +9,14 @@ Public interface used by the rest of the app:
 
 Embeddings are computed locally with sentence-transformers (384 dims)
 and stored alongside chunk metadata in ``report_chunks``.
+
+Retrieval uses **hybrid search via Reciprocal Rank Fusion (RRF)**:
+- Vec ranker: pgvector cosine (HNSW index on ``embedding``).
+- BM25 ranker: Postgres FTS over ``text_tsv`` (GIN index, Spanish stemmer).
+- Fusion: ``score = Σ 1 / (k + rank_i)`` with ``k=60`` (Cormack et al., 2009).
+Each ranker independently pulls a fan-out of candidates; their ranks (not
+scores) are fused. Chunks that show up in both rankers win; lexical-only
+hits still get a fighting chance for entities/numbers the embedder misses.
 """
 
 from __future__ import annotations
@@ -17,30 +25,22 @@ import asyncio
 import time
 from typing import Dict, List, Optional, Tuple
 
-import psycopg
-from pgvector.psycopg import register_vector
-
 from core.config import DATABASE_URL, SIMILARITY_THRESHOLD_RETRIEVAL
+from core.db import get_pool
 from core.embedder import embed_query, embed_texts
 
 
 # ---------------------------------------------------------------------------
-# Connection helper
+# RRF tuning knobs
 # ---------------------------------------------------------------------------
 
+# Standard suavizado constant from the original RRF paper. Aplasta el efecto
+# de "estar primero" lo suficiente como para que un falso #1 no domine.
+_RRF_K = 60
 
-def _connect() -> psycopg.Connection:
-    """Open a fresh connection. We open per-call instead of pooling because
-    Supabase's session pooler already multiplexes connections server-side
-    and the request rate is low.
-    """
-    if not DATABASE_URL:
-        raise RuntimeError(
-            "DATABASE_URL no está configurada. Revisá .env."
-        )
-    conn = psycopg.connect(DATABASE_URL)
-    register_vector(conn)
-    return conn
+# Candidatos que pide cada ranker. Más fanout = mejor recall de fusión a
+# costa de un poco de latencia. 50 alcanza para un corpus de miles.
+_RRF_FANOUT = 50
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +142,12 @@ def _meta_to_row(chunk: Dict) -> Tuple:
 
 
 def _row_to_chunk(row: Tuple) -> Dict:
-    """Hydrate a SELECT row into the dict shape callers expect."""
+    """Hydrate a base SELECT row into the dict shape callers expect.
+
+    Expects the first 12 columns produced by the RRF query (chunk_id …
+    distance). The RRF-specific columns (rrf_score, vec_rank, bm25_rank)
+    are attached by the caller.
+    """
     (
         chunk_id,
         source_file,
@@ -217,12 +222,93 @@ def add_chunks(chunks: List[Dict], collection_name: Optional[str] = None) -> Non
         base = _meta_to_row(chunk)
         rows.append(base + (emb.tolist() if hasattr(emb, "tolist") else list(emb),))
 
-    with _connect() as conn, conn.cursor() as cur:
+    pool = get_pool()
+    with pool.connection() as conn, conn.cursor() as cur:
         # Insert in batches so a single failure doesn't kill the whole load.
         batch_size = 200
         for i in range(0, len(rows), batch_size):
             cur.executemany(_INSERT_SQL, rows[i : i + batch_size])
             conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# RRF retrieval
+# ---------------------------------------------------------------------------
+
+
+# We materialize the query embedding + FTS tsquery in a CTE so both rankers
+# can reference them without recomputing. Filters (``where_sql``) are
+# applied to BOTH rankers — a chunk excluded by a section filter should
+# disappear from FX and vec alike.
+_RRF_SQL_TEMPLATE = """
+    WITH q AS (
+        SELECT %s::vector AS qv, plainto_tsquery('spanish', %s) AS qts
+    ),
+    -- vec_top: pull top-K from the HNSW index BEFORE assigning ranks.
+    -- Doing the LIMIT inside a subquery lets the planner push it to the
+    -- index. The outer row_number() then ranks only those K rows.
+    vec_top AS (
+        SELECT chunk_id,
+               embedding <=> (SELECT qv FROM q) AS dist
+        FROM report_chunks
+        WHERE 1=1{where_sql}
+        ORDER BY embedding <=> (SELECT qv FROM q)
+        LIMIT %s
+    ),
+    vec AS (
+        SELECT chunk_id,
+               row_number() OVER (ORDER BY dist) AS rnk
+        FROM vec_top
+    ),
+    bm25_top AS (
+        SELECT chunk_id,
+               ts_rank_cd(text_tsv, (SELECT qts FROM q)) AS score
+        FROM report_chunks
+        WHERE text_tsv @@ (SELECT qts FROM q){where_sql}
+        ORDER BY ts_rank_cd(text_tsv, (SELECT qts FROM q)) DESC
+        LIMIT %s
+    ),
+    bm25 AS (
+        SELECT chunk_id,
+               row_number() OVER (ORDER BY score DESC) AS rnk
+        FROM bm25_top
+    ),
+    fused_ids AS (
+        SELECT chunk_id FROM vec
+        UNION
+        SELECT chunk_id FROM bm25
+    ),
+    scored AS (
+        SELECT f.chunk_id,
+               v.rnk AS vec_rnk,
+               b.rnk AS bm25_rnk,
+               COALESCE(1.0 / (%s + v.rnk), 0)
+                 + COALESCE(1.0 / (%s + b.rnk), 0) AS rrf_score
+        FROM fused_ids f
+        LEFT JOIN vec  v USING (chunk_id)
+        LEFT JOIN bm25 b USING (chunk_id)
+    )
+    SELECT
+        r.chunk_id,
+        r.source_file,
+        r.pub_date,
+        r.page_number,
+        r.block_index,
+        r.block_header,
+        r.section,
+        r.chunk_index,
+        r.text_chunk,
+        r.topic_keys,
+        r.topic_tags,
+        (r.embedding <=> (SELECT qv FROM q)) AS distance,
+        s.rrf_score,
+        s.vec_rnk,
+        s.bm25_rnk
+    FROM scored s
+    JOIN report_chunks r ON r.chunk_id = s.chunk_id
+    ORDER BY s.rrf_score DESC
+    LIMIT %s
+"""
 
 
 def query_chunks(
@@ -232,45 +318,51 @@ def query_chunks(
     where: Optional[Dict] = None,
     similarity_threshold: float | None = None,
 ) -> List[Dict]:
-    """Hybrid retrieval: top-K + similarity floor.
+    """Hybrid retrieval via Reciprocal Rank Fusion (vec + BM25).
 
     ``where`` accepts the same Chroma-style dict that filter_extractor
     produces; we translate it to a SQL WHERE on the fly. Pass
     ``similarity_threshold=0.0`` to disable the floor.
+
+    The threshold is applied **only** to chunks that came from vec alone
+    (no BM25 contribution). Chunks that match BM25 lexically pass through
+    even if their cosine similarity is below threshold — that's the whole
+    point of having two rankers.
     """
     if similarity_threshold is None:
         similarity_threshold = SIMILARITY_THRESHOLD_RETRIEVAL
 
     embedding = embed_query(query).tolist()
     where_sql, where_params = _build_where(where)
+    sql = _RRF_SQL_TEMPLATE.format(where_sql=where_sql)
 
-    sql = f"""
-        SELECT
-            chunk_id,
-            source_file,
-            pub_date,
-            page_number,
-            block_index,
-            block_header,
-            section,
-            chunk_index,
-            text_chunk,
-            topic_keys,
-            topic_tags,
-            embedding <=> %s::vector AS distance
-        FROM report_chunks
-        WHERE 1=1{where_sql}
-        ORDER BY embedding <=> %s::vector
-        LIMIT %s
-    """
-    params = [embedding] + where_params + [embedding, k]
+    # Order matters — see _RRF_SQL_TEMPLATE for the slot layout.
+    params: list = (
+        [embedding, query]            # CTE q
+        + where_params + [_RRF_FANOUT]  # vec WHERE + LIMIT
+        + where_params + [_RRF_FANOUT]  # bm25 WHERE + LIMIT
+        + [_RRF_K, _RRF_K]            # rrf suavizado constants
+        + [k]                          # final LIMIT
+    )
 
     out: List[Dict] = []
-    with _connect() as conn, conn.cursor() as cur:
+    pool = get_pool()
+    with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(sql, params)
         for row in cur.fetchall():
-            chunk = _row_to_chunk(row)
-            if similarity_threshold > 0 and chunk["similarity"] < similarity_threshold:
+            base = row[:12]
+            rrf_score, vec_rnk, bm25_rnk = row[12], row[13], row[14]
+            chunk = _row_to_chunk(base)
+            chunk["rrf_score"] = float(rrf_score) if rrf_score is not None else 0.0
+            chunk["vec_rank"] = int(vec_rnk) if vec_rnk is not None else None
+            chunk["bm25_rank"] = int(bm25_rnk) if bm25_rnk is not None else None
+
+            has_bm25 = bm25_rnk is not None
+            if (
+                similarity_threshold > 0
+                and not has_bm25
+                and chunk["similarity"] < similarity_threshold
+            ):
                 continue
             out.append(chunk)
     return out
@@ -317,7 +409,8 @@ def get_collection_summary(
     if not force_refresh and cached and cached["expires_at"] > now:
         return cached["data"]
 
-    with _connect() as conn, conn.cursor() as cur:
+    pool = get_pool()
+    with pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM report_chunks")
         total_chunks = cur.fetchone()[0]
 
@@ -385,7 +478,8 @@ def truncate_collection() -> int:
 
     Used by ingest --reset and tests that need a clean slate.
     """
-    with _connect() as conn, conn.cursor() as cur:
+    pool = get_pool()
+    with pool.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM report_chunks")
         n = cur.fetchone()[0]
         cur.execute("TRUNCATE report_chunks")

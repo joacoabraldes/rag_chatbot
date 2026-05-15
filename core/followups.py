@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from typing import List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 from openai import AsyncOpenAI
 
@@ -92,18 +92,48 @@ def _is_assistant_perspective(text: str) -> bool:
     return False
 
 
+def _format_corpus_grounding(summary: Optional[Dict]) -> str:
+    """Render a compact grounding block to keep follow-ups within corpus reach.
+
+    Without this the generator proposes plausible-sounding but unanswerable
+    questions (months outside coverage, data classes the bot can't reach).
+    """
+    if not summary or not summary.get("total_docs"):
+        return ""
+    parts: List[str] = []
+    if summary.get("date_min") and summary.get("date_max"):
+        parts.append(
+            f"Rango de informes disponibles: {summary['date_min']} a "
+            f"{summary['date_max']}."
+        )
+    if summary.get("latest_file"):
+        parts.append(f"Informe más reciente: {summary['latest_file']}.")
+    parts.append(
+        "Datos numéricos exactos disponibles vía SQL solo para: FX (dólar "
+        "oficial, MEP, CCL, brecha, A3500) y operaciones MAE/forex. "
+        "NO hay datos numéricos para reservas, bonos soberanos, "
+        "commodities ni equity argentino — esos temas existen solo como "
+        "narrativa en los informes."
+    )
+    return "=== ALCANCE DEL CORPUS ===\n" + "\n".join(parts)
+
+
 async def _ask_model(
     model: str,
     query: str,
     answer_tail: str,
+    corpus_grounding: str = "",
     retry_note: str = "",
     trace: Optional["RequestTrace"] = None,
 ) -> List[str]:
-    user_content = (
-        f"Pregunta del usuario:\n{query}\n\n"
-        f"Respuesta dada:\n{answer_tail}\n\n"
-        "Generá 3 preguntas de seguimiento relevantes."
-    )
+    parts = [
+        f"Pregunta del usuario:\n{query}",
+        f"Respuesta dada:\n{answer_tail}",
+    ]
+    if corpus_grounding:
+        parts.append(corpus_grounding)
+    parts.append("Generá 3 preguntas de seguimiento relevantes.")
+    user_content = "\n\n".join(parts)
     if retry_note:
         user_content += f"\n\nIMPORTANTE: {retry_note}"
 
@@ -139,6 +169,7 @@ async def _ask_model(
 async def generate_followups(
     query: str,
     answer: str,
+    collection_summary: Optional[Dict] = None,
     model: str | None = None,
     trace: Optional["RequestTrace"] = None,
 ) -> List[str]:
@@ -148,6 +179,10 @@ async def generate_followups(
     que te explique...?"). If the first batch leaves us short, we ask
     the model once more with an explicit corrective note. Fails silently
     — an empty list hides the chips in the UI.
+
+    ``collection_summary`` is optional grounding (date range, latest file,
+    which data classes have SQL backing). When provided, the LLM stays
+    inside the corpus and avoids suggesting queries the bot can't answer.
     """
     if not answer.strip():
         return []
@@ -157,9 +192,14 @@ async def generate_followups(
         trimmed_answer = trimmed_answer[-1200:]
 
     chosen_model = model or OPENAI_MODEL_FAST
+    grounding = _format_corpus_grounding(collection_summary)
 
     try:
-        candidates = await _ask_model(chosen_model, query, trimmed_answer, trace=trace)
+        candidates = await _ask_model(
+            chosen_model, query, trimmed_answer,
+            corpus_grounding=grounding,
+            trace=trace,
+        )
     except Exception:
         return []
 
@@ -172,6 +212,7 @@ async def generate_followups(
                 chosen_model,
                 query,
                 trimmed_answer,
+                corpus_grounding=grounding,
                 retry_note=(
                     "Las preguntas se envían tal cual al asistente como nuevo "
                     "turno del usuario. NO uses '¿Querés...?', '¿Te interesa...?', "

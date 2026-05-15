@@ -25,7 +25,7 @@ from typing import Any
 
 import psycopg
 
-from core.config import DATABASE_URL
+from core.db import get_pool
 
 log = logging.getLogger("rag.sql_tools")
 
@@ -33,12 +33,6 @@ log = logging.getLogger("rag.sql_tools")
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _connect() -> psycopg.Connection:
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL no configurada en .env")
-    return psycopg.connect(DATABASE_URL, connect_timeout=10)
 
 
 def _validate_iso_date(value: str, field: str = "date") -> str:
@@ -106,7 +100,7 @@ def get_fx(date_from: str, date_to: str | None = None) -> list[dict]:
         ORDER BY "date"
         LIMIT 90
     """
-    with _connect() as conn, conn.cursor() as cur:
+    with get_pool().connection() as conn, conn.cursor() as cur:
         cur.execute(sql, (df, dt))
         return _rows_to_dicts(cur)
 
@@ -168,7 +162,7 @@ def get_forex_operations(
     sql += ' ORDER BY "date", hora NULLS LAST LIMIT %s'
     params.append(limit)
 
-    with _connect() as conn, conn.cursor() as cur:
+    with get_pool().connection() as conn, conn.cursor() as cur:
         cur.execute(sql, params)
         return _rows_to_dicts(cur)
 
@@ -204,7 +198,7 @@ def get_forex_volume_summary(
         params.append(currency.strip().upper())
     sql += ' GROUP BY "date", TRIM(currency_out) ORDER BY "date" LIMIT 90'
 
-    with _connect() as conn, conn.cursor() as cur:
+    with get_pool().connection() as conn, conn.cursor() as cur:
         cur.execute(sql, params)
         return _rows_to_dicts(cur)
 
